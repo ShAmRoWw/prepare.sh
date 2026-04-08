@@ -560,7 +560,7 @@ cmd_status() {
             echo -e "  ${RED}✗${NC} $dep"; count_miss
         fi
     done
-    for pkg in seclists libpcap-dev; do
+    for pkg in seclists libpcap-dev libkrb5-dev; do
         if dpkg -s "$pkg" &>/dev/null; then
             echo -e "  ${GREEN}✓${NC} $pkg ${DIM}(dpkg)${NC}"; count_ok
         else
@@ -571,12 +571,12 @@ cmd_status() {
     # ── Docker ─────────────────────────────────────────────────────────────
     echo ""
     info "Docker"
-    if cmd_exists docker; then
+    if cmd_exists docker && docker --version &>/dev/null; then
         echo -e "  ${GREEN}✓${NC} docker ${DIM}$(command -v docker)${NC}"; count_ok
     else
         echo -e "  ${RED}✗${NC} docker"; count_miss
     fi
-    if cmd_exists docker && docker compose version &>/dev/null; then
+    if cmd_exists docker && docker --version &>/dev/null && docker compose version &>/dev/null; then
         echo -e "  ${GREEN}✓${NC} docker compose ${DIM}(docker compose version)${NC}"; count_ok
     else
         echo -e "  ${RED}✗${NC} docker compose"; count_miss
@@ -1060,11 +1060,11 @@ cmd_install() {
     # ── 1. apt (обновляем Git в первую очередь для --revision) ────────────────
     header "Системные пакеты (apt)"
     sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev seclists
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev libkrb5-dev seclists
 
     # ── 1.1 Docker ─────────────────────────────────────────────────────────
     header "Docker"
-    if cmd_exists docker; then
+    if cmd_exists docker && docker --version &>/dev/null; then
         success "docker уже установлен"
     else
         info "Установка docker.io и docker-compose..."
@@ -1379,7 +1379,7 @@ WRAPPER_EOF
     header "Шаблоны Nuclei"
     if cmd_exists nuclei; then
         info "Обновление шаблонов nuclei..."
-        nuclei -update-templates 2>/dev/null || warn "Не удалось обновить шаблоны nuclei"
+        nuclei -update-templates -update-template-dir "${TOOLS_DIR}/nuclei-templates" 2>/dev/null || warn "Не удалось обновить шаблоны nuclei"
     fi
 
     # ── 13. BloodHound (через bloodhound-automation) ─────────────────────────
