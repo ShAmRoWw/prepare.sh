@@ -30,7 +30,7 @@ cd prepare.sh
 
 ## Что устанавливается
 
-**Системные зависимости:** git, curl, wget, python3-pip, libpcap-dev, seclists, docker, libkrb5-dev.
+**Системные зависимости:** git, curl, wget, python3-pip, libpcap-dev, seclists, docker.
 
 **Go:** указанная версия Go и утилиты: httpx, nuclei.
 
