@@ -11,7 +11,7 @@
 # ВАЖНО: --install, --auto и --check-updates выполнять с включенным VPN.
 #
 # Быстрый старт (curl):
-#   curl -fsSL https://raw.githubusercontent.com/<REPO>/main/prepare.sh | bash -s -- --auto
+#   curl -fsSL https://raw.githubusercontent.com/ShAmRoWw/prepare.sh/refs/heads/main/prepare.sh | bash -s -- --auto
 
 set -euo pipefail
 
@@ -560,7 +560,7 @@ cmd_status() {
             echo -e "  ${RED}✗${NC} $dep"; count_miss
         fi
     done
-    for pkg in seclists libpcap-dev libkrb5-dev; do
+    for pkg in seclists libpcap-dev libkrb5-dev wmctrl; do
         if dpkg -s "$pkg" &>/dev/null; then
             echo -e "  ${GREEN}✓${NC} $pkg ${DIM}(dpkg)${NC}"; count_ok
         else
@@ -1060,7 +1060,7 @@ cmd_install() {
     # ── 1. apt (обновляем Git в первую очередь для --revision) ────────────────
     header "Системные пакеты (apt)"
     sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev libkrb5-dev seclists
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev libkrb5-dev seclists wmctrl
 
     # ── 1.1 Docker ─────────────────────────────────────────────────────────
     header "Docker"
