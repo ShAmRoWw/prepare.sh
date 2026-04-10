@@ -53,18 +53,18 @@ GO_VERSION="1.25.8"
 # Устанавливается как: uv tool install "git+${URL}@${версия}"
 declare -A UV_TOOLS=(
     [penelope]="v0.19.1|https://github.com/brightio/penelope"
-    [netexec]="v1.5.1|https://github.com/Pennyw0rth/NetExec"
-    [bloodyAD]="v2.5.4|https://github.com/CravateRouge/bloodyAD"
+    [netexec]="67d90e0227dab0e1ba57d3a027fc821ee7c20bd3|https://github.com/Pennyw0rth/NetExec"
+    [bloodyAD]="3ee204d11d8ce658b3e9c79080543d28f925520b|https://github.com/CravateRouge/bloodyAD"
     [pre2k]="fa816f5a411208d0f9445b181248bedadcfedf05|https://github.com/garrettfoster13/pre2k"
     [smbclientng]="3.0.0|https://github.com/p0dalirius/smbclient-ng"
-    [AD-Miner]="v1.8.1|https://github.com/AD-Security/AD_Miner"
+    [AD-Miner]="v1.9.0|https://github.com/AD-Security/AD_Miner"
     [conpass]="8b22245cb0cf22bb63b27a85c64a23eb1848be17|https://github.com/login-securite/conpass"
-    [ldeep]="2.0.0|https://github.com/franc-pentest/ldeep"
+    [ldeep]="89abc02e7f99fdf0df8b37e0f15849263d2e6cce|https://github.com/franc-pentest/ldeep"
     [certipy]="5.0.4|https://github.com/ly4k/Certipy"
     [dnsrecon]="1.6.0|https://github.com/darkoperator/dnsrecon"
-    [msldap]="0.5.15|https://github.com/skelsec/msldap"
+    [msldap]="46d4dc60dc2e4739c188a848b090dcc064d7888d|https://github.com/skelsec/msldap"
     [RITM]="e442b5c9b85c0a6a387491182472e3d3fbcf97fb|https://github.com/Tw1sm/RITM"
-    [impacket]="d400a6aa6a7f1954d82a7301dbe14f403e060e7d|https://github.com/fortra/impacket"
+    [impacket]="7fc084ad199bf5c2fb1c513544bee914117aab42|https://github.com/fortra/impacket"
 )
 
 # Go-утилиты
@@ -95,7 +95,7 @@ declare -A VENV_REPOS=(
     [krbrelayx]="https://github.com/dirkjanm/krbrelayx.git|10b45a33bc4361ec4a5546eea62db2e4244d3255|krbrelayx.py|dnspython,impacket,ldap3"
     [bloodhound-automation]="https://github.com/Tanguy-Boisset/bloodhound-automation.git|92a1b6ccb3c2968359992d16fb15bae7f51e61b2|bloodhound-automation.py|"
     [targetedKerberoast]="https://github.com/ShutdownRepo/targetedKerberoast.git|ebed0790002dfae503eb5e5525a0630f131fa117|targetedKerberoast.py|"
-    [pyLDAPWordlistHarvester]="https://github.com/p0dalirius/pyLDAPWordlistHarvester.git|60c619dd3822f1de14e2abef89637ae24d577aaa|pyLDAPWordlistHarvester.py|"
+    [pyLDAPWordlistHarvester]="https://github.com/p0dalirius/pyLDAPWordlistHarvester.git|78cd116f56554b0fface83f4074a29447fa35c54|pyLDAPWordlistHarvester.py|"
     [ASRepCatcher]="https://github.com/Yaxxine7/ASRepCatcher.git|4b70dcaf09dc75b4c1b60965c883ada2128adf8c|ASRepCatcher/ASRepCatcher.py|"
     [PCredz]="https://github.com/lgandx/PCredz.git|a07051d392b50bded1a19734cb70f97010cd90a5|Pcredz|pcapy-ng"
 )
