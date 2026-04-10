@@ -934,7 +934,7 @@ cmd_skip() {
     fi
 
     local head_commit
-    head_commit=$(git ls-remote "$repo_url" HEAD 2>/dev/null | cut -f1)
+    head_commit=$(git ls-remote "$repo_url" HEAD 2>/dev/null | awk '$2 == "HEAD" {print $1}')
     if [ -z "$head_commit" ]; then
         error "Не удалось получить HEAD для $name ($repo_url)"
         exit 1
