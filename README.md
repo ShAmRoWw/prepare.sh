@@ -10,7 +10,7 @@ sudo -v && curl -fsSL https://raw.githubusercontent.com/ShAmRoWw/prepare.sh/refs
 
 # Запуск вручную
 git clone https://github.com/ShAmRoWw/prepare.sh.git
-cd prepare.sh
+cd prepare.sh && chmod +x prepare.sh
 ./prepare.sh --install
 ```
 
