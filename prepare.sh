@@ -8,7 +8,7 @@
 #   ./prepare.sh --auto          — полностью автоматическая установка (без вопросов)
 #   ./prepare.sh --check-updates — сверить, есть ли новые версии на remote
 #
-# ВАЖНО: --install, --auto и --check-updates выполнять с включенным VPN.
+# ВАЖНО: --install, --auto и --check-updates используют сеть; при необходимости задайте HTTP/HTTPS proxy.
 #
 # Быстрый старт (curl):
 #   curl -fsSL https://raw.githubusercontent.com/ShAmRoWw/prepare.sh/refs/heads/main/prepare.sh | bash -s -- --auto
@@ -36,6 +36,7 @@ SKIP_FILE="$HOME/.local/share/prepare/skipped.conf"
 # между устройствами. Если пусто — работает только локально.
 SKIP_GIST_ID="87ba4463703d9c46cf2c969091992e28"
 SKIP_GIST_FILE="skipped.conf"
+declare -a PROXY_ENV_ARGS=()
 
 # ─── PATH: добавляем директории инструментов (bash не читает .bashrc) ─────────
 for _p in "$HOME/.local/bin" "/usr/local/go/bin" "$HOME/go/bin"; do
@@ -47,24 +48,25 @@ done
 unset _p
 
 # Версия Go (обновить при необходимости)
-GO_VERSION="1.25.8"
+GO_VERSION="1.26.3"
 
 # uv tools: [имя]="версия|URL_репозитория"
 # Устанавливается как: uv tool install "git+${URL}@${версия}"
 declare -A UV_TOOLS=(
     [penelope]="v0.19.1|https://github.com/brightio/penelope"
-    [netexec]="67d90e0227dab0e1ba57d3a027fc821ee7c20bd3|https://github.com/Pennyw0rth/NetExec"
+    [netexec]="0fbff80d9c34ceac8d4402921f6120c39949e235|https://github.com/Pennyw0rth/NetExec"
     [bloodyAD]="3ee204d11d8ce658b3e9c79080543d28f925520b|https://github.com/CravateRouge/bloodyAD"
     [pre2k]="fa816f5a411208d0f9445b181248bedadcfedf05|https://github.com/garrettfoster13/pre2k"
     [smbclientng]="1970cc6fcde1e8ac3b5483b0f5519f6d58db3f3b|https://github.com/p0dalirius/smbclient-ng"
     [AD-Miner]="v1.9.0|https://github.com/AD-Security/AD_Miner"
     [conpass]="8b22245cb0cf22bb63b27a85c64a23eb1848be17|https://github.com/login-securite/conpass"
-    [ldeep]="89abc02e7f99fdf0df8b37e0f15849263d2e6cce|https://github.com/franc-pentest/ldeep"
+    [ldeep]="2.0.2|https://github.com/franc-pentest/ldeep"
     [certipy]="5.0.4|https://github.com/ly4k/Certipy"
     [dnsrecon]="1.6.0|https://github.com/darkoperator/dnsrecon"
     [msldap]="46d4dc60dc2e4739c188a848b090dcc064d7888d|https://github.com/skelsec/msldap"
     [RITM]="e442b5c9b85c0a6a387491182472e3d3fbcf97fb|https://github.com/Tw1sm/RITM"
-    [impacket]="7fc084ad199bf5c2fb1c513544bee914117aab42|https://github.com/fortra/impacket"
+    [impacket]="e33307acc079648b1751b472d63059bab17bde9c|https://github.com/fortra/impacket"
+    [manspider]="dd76e9c9c460537828bb0143d23bba0b7c9f5185|https://github.com/blacklanternsecurity/MANSPIDER"
 )
 
 # Go-утилиты
@@ -123,6 +125,49 @@ success() { echo -e "${GREEN}[+]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $*"; }
 error()   { echo -e "${RED}[-]${NC} $*"; }
 header()  { echo -e "\n${CYAN}══════════════════════════════════════════${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}══════════════════════════════════════════${NC}"; }
+
+PROGRESS_TOTAL=0
+PROGRESS_CURRENT=0
+PROGRESS_WIDTH=32
+
+progress_render() {
+    local current="$1" total="$2" label="$3"
+    [ "$total" -gt 0 ] || return 0
+
+    local filled=$(( current * PROGRESS_WIDTH / total ))
+    [ "$filled" -gt "$PROGRESS_WIDTH" ] && filled="$PROGRESS_WIDTH"
+    local empty=$(( PROGRESS_WIDTH - filled ))
+    local done_bar pending_bar
+
+    printf -v done_bar '%*s' "$filled" ''
+    done_bar=${done_bar// /#}
+    printf -v pending_bar '%*s' "$empty" ''
+    pending_bar=${pending_bar// /-}
+
+    echo -e "${DIM}[${done_bar}${pending_bar}]${NC} ${current}/${total} ${label}"
+}
+
+progress_start() {
+    PROGRESS_TOTAL="$1"
+    PROGRESS_CURRENT=0
+    progress_render "$PROGRESS_CURRENT" "$PROGRESS_TOTAL" "$2"
+}
+
+progress_step() {
+    PROGRESS_CURRENT=$((PROGRESS_CURRENT + 1))
+    progress_render "$PROGRESS_CURRENT" "$PROGRESS_TOTAL" "$1"
+}
+
+progress_finish() {
+    PROGRESS_CURRENT="$PROGRESS_TOTAL"
+    progress_render "$PROGRESS_CURRENT" "$PROGRESS_TOTAL" "$1"
+}
+
+install_phase() {
+    local title="$1"
+    progress_step "$title"
+    header "$title"
+}
 
 cmd_exists() { command -v "$1" &>/dev/null; }
 
@@ -192,6 +237,156 @@ ensure_path_entry() {
         *":$entry:"*) ;;
         *) export PATH="$entry:$PATH" ;;
     esac
+}
+
+first_nonempty_env() {
+    local primary="$1" fallback="$2"
+    if [ -n "${!primary:-}" ]; then
+        printf '%s' "${!primary}"
+    else
+        printf '%s' "${!fallback:-}"
+    fi
+}
+
+build_proxy_env_args() {
+    PROXY_ENV_ARGS=()
+    if [ -n "${http_proxy:-}" ]; then
+        PROXY_ENV_ARGS+=("http_proxy=$http_proxy" "HTTP_PROXY=$http_proxy")
+    fi
+    if [ -n "${https_proxy:-}" ]; then
+        PROXY_ENV_ARGS+=("https_proxy=$https_proxy" "HTTPS_PROXY=$https_proxy")
+    fi
+}
+
+export_proxy_settings() {
+    if [ -n "${http_proxy:-}" ]; then
+        export http_proxy
+        export HTTP_PROXY="$http_proxy"
+    else
+        unset http_proxy HTTP_PROXY || true
+    fi
+
+    if [ -n "${https_proxy:-}" ]; then
+        export https_proxy
+        export HTTPS_PROXY="$https_proxy"
+    else
+        unset https_proxy HTTPS_PROXY || true
+    fi
+
+    build_proxy_env_args
+}
+
+sudo_with_proxy() {
+    sudo "${PROXY_ENV_ARGS[@]}" "$@"
+}
+
+patch_bloodhound_automation_compose_file() {
+    local compose_file="$1"
+
+    [ -f "$compose_file" ] || return 0
+
+    python3 - "$compose_file" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+replacements = (
+    (
+        '      - POSTGRES_DATABASE=${POSTGRES_DATABASE:-bloodhound}\n',
+        '      - POSTGRES_DATABASE=${POSTGRES_DATABASE:-bloodhound}\n'
+        '      - http_proxy=${http_proxy:-}\n'
+        '      - https_proxy=${https_proxy:-}\n'
+        '      - HTTP_PROXY=${http_proxy:-}\n'
+        '      - HTTPS_PROXY=${https_proxy:-}\n',
+    ),
+    (
+        '      - NEO4J_PLUGINS=["graph-data-science"]\n',
+        '      - NEO4J_PLUGINS=["graph-data-science"]\n'
+        '      - http_proxy=${http_proxy:-}\n'
+        '      - https_proxy=${https_proxy:-}\n'
+        '      - HTTP_PROXY=${http_proxy:-}\n'
+        '      - HTTPS_PROXY=${https_proxy:-}\n',
+    ),
+    (
+        '      retries: 5\n      start_period: 30s\n\n  bloodhound:\n',
+        '      retries: 10\n      start_period: 120s\n\n  bloodhound:\n',
+    ),
+    (
+        '      - bhe_disable_cypher_qc=${bhe_disable_cypher_qc:-false}\n',
+        '      - bhe_disable_cypher_qc=${bhe_disable_cypher_qc:-false}\n'
+        '      - http_proxy=${http_proxy:-}\n'
+        '      - https_proxy=${https_proxy:-}\n'
+        '      - HTTP_PROXY=${http_proxy:-}\n'
+        '      - HTTPS_PROXY=${https_proxy:-}\n',
+    ),
+)
+
+for old, new in replacements:
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new in text:
+        continue
+    else:
+        raise SystemExit(f"bloodhound-automation compose patch failed: expected fragment not found: {old.strip()}")
+
+path.write_text(text)
+PY
+}
+
+patch_bloodhound_automation_install() {
+    local dir="$1"
+    local project_py="${dir}/src/project.py"
+    local compose_file
+
+    if [ -f "$project_py" ]; then
+        if grep -q 'self.templates_directory = Path(__file__).resolve().parent.parent / "templates"' "$project_py"; then
+            success "bloodhound-automation: пути шаблонов уже исправлены"
+        else
+            python3 - "$project_py" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+replacements = (
+    (
+        '        self.no_gds = no_gds\n',
+        '        self.no_gds = no_gds\n        self.templates_directory = Path(__file__).resolve().parent.parent / "templates"\n',
+    ),
+    (
+        '        with open("./templates/docker-compose.yml", "r") as ifile:\n',
+        '        with open(self.templates_directory / "docker-compose.yml", "r") as ifile:\n',
+    ),
+    (
+        '        with open("./templates/bloodhound.config.json", "r") as ifile:\n',
+        '        with open(self.templates_directory / "bloodhound.config.json", "r") as ifile:\n',
+    ),
+)
+
+for old, new in replacements:
+    if old not in text:
+        raise SystemExit(f"bloodhound-automation patch failed: expected fragment not found: {old.strip()}")
+    text = text.replace(old, new, 1)
+
+path.write_text(text)
+PY
+
+            success "bloodhound-automation: исправлены относительные пути шаблонов"
+        fi
+    fi
+
+    patch_bloodhound_automation_compose_file "${dir}/templates/docker-compose.yml"
+
+    if [ -d "${dir}/projects" ]; then
+        while IFS= read -r compose_file; do
+            patch_bloodhound_automation_compose_file "$compose_file"
+        done < <(find "${dir}/projects" -mindepth 2 -maxdepth 2 -type f -name 'docker-compose.yml' | sort)
+    fi
+
+    success "bloodhound-automation: docker-compose обновлен (proxy + healthcheck)"
 }
 
 # Определяет, является ли ref коммитом (hex 40 символов полный или >= 8 символов с хотя бы одной буквой a-f)
@@ -384,18 +579,65 @@ check_remote_updates() {
 # Неинтерактивный режим (--auto): пропускает все подтверждения
 AUTO_MODE=false
 
-# Запрос подтверждения VPN
-confirm_vpn() {
+# Настройка HTTP/HTTPS proxy
+configure_proxy() {
+    local current_http current_https http_answer https_answer
+
+    current_http=$(first_nonempty_env http_proxy HTTP_PROXY)
+    current_https=$(first_nonempty_env https_proxy HTTPS_PROXY)
+
+    http_proxy="$current_http"
+    https_proxy="$current_https"
+
     if [ "$AUTO_MODE" = true ]; then
-        info "Автоматический режим: VPN-подтверждение пропущено"
+        if [ -z "${https_proxy:-}" ] && [ -n "${http_proxy:-}" ]; then
+            https_proxy="$http_proxy"
+        fi
+        export_proxy_settings
+        if [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
+            info "Автоматический режим: используются HTTP/HTTPS proxy из окружения"
+        else
+            info "Автоматический режим: HTTP/HTTPS proxy не заданы"
+        fi
         return 0
     fi
-    warn "Для этого режима нужен VPN и доступ в сеть"
+
+    warn "При необходимости настройте HTTP/HTTPS proxy для сетевых операций и контейнеров BloodHound"
     echo ""
-    read -rp "VPN включен? [y/N]: " vpn_answer
-    if [[ ! "$vpn_answer" =~ ^[Yy]$ ]]; then
-        error "Операция прервана. Включите VPN и запустите скрипт снова."
-        exit 1
+
+    if [ -n "$current_http" ]; then
+        read -rp "HTTP proxy [${current_http}] (Enter — оставить, '-' — убрать): " http_answer
+    else
+        read -rp "HTTP proxy (например http://127.0.0.1:8080, Enter — без proxy): " http_answer
+    fi
+    case "$http_answer" in
+        "") ;;
+        "-") http_proxy="" ;;
+        *) http_proxy="$http_answer" ;;
+    esac
+
+    if [ -n "$current_https" ]; then
+        read -rp "HTTPS proxy [${current_https}] (Enter — оставить, '=' — как HTTP, '-' — убрать): " https_answer
+    else
+        read -rp "HTTPS proxy (Enter — как HTTP proxy, '-' — без proxy): " https_answer
+    fi
+    case "$https_answer" in
+        "")
+            if [ -z "$current_https" ]; then
+                https_proxy="$http_proxy"
+            fi
+            ;;
+        "=") https_proxy="$http_proxy" ;;
+        "-") https_proxy="" ;;
+        *) https_proxy="$https_answer" ;;
+    esac
+
+    export_proxy_settings
+
+    if [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
+        success "Proxy-настройки применены"
+    else
+        info "Proxy не задан"
     fi
     echo ""
 }
@@ -742,7 +984,7 @@ display_update_result() {
 
 cmd_check_updates() {
     header "Проверка обновлений (remote)"
-    confirm_vpn
+    configure_proxy
     gist_pull
 
     # ── Фаза 1: параллельный запрос всех remote ─────────────────────────────
@@ -1025,6 +1267,7 @@ cmd_skip_import() {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 cmd_install() {
+    local install_phase_total=13
 
     # ── Логирование ───────────────────────────────────────────────────────────
     mkdir -p "$LOG_DIR"
@@ -1034,6 +1277,7 @@ cmd_install() {
 
     # ── 0. Предварительные проверки ───────────────────────────────────────────
     header "Установка инструментов"
+    progress_start "$install_phase_total" "Подготовка"
 
     if [ "$(id -u)" -eq 0 ]; then
         error "Не запускайте этот скрипт от root. sudo будет запрошен где нужно."
@@ -1055,20 +1299,20 @@ cmd_install() {
     SUDO_KEEPALIVE_PID=$!
     trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
 
-    confirm_vpn
+    configure_proxy
 
     # ── 1. apt (обновляем Git в первую очередь для --revision) ────────────────
-    header "Системные пакеты (apt)"
-    sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev libkrb5-dev seclists wmctrl
+    install_phase "Системные пакеты (apt)"
+    sudo_with_proxy DEBIAN_FRONTEND=noninteractive apt-get update -y
+    sudo_with_proxy DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git curl wget python3-pip libpcap-dev libkrb5-dev seclists wmctrl
 
     # ── 1.1 Docker ─────────────────────────────────────────────────────────
-    header "Docker"
+    install_phase "Docker"
     if cmd_exists docker && docker --version &>/dev/null; then
         success "docker уже установлен"
     else
         info "Установка docker.io и docker-compose..."
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" docker.io docker-compose
+        sudo_with_proxy DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" docker.io docker-compose
         sudo systemctl enable docker --now
         success "Docker установлен и запущен"
     fi
@@ -1101,7 +1345,7 @@ cmd_install() {
     fi
 
     # ── 2. uv ─────────────────────────────────────────────────────────────────
-    header "uv"
+    install_phase "uv"
     if cmd_exists uv; then
         success "uv уже установлен: $(uv --version 2>/dev/null)"
     else
@@ -1118,7 +1362,7 @@ cmd_install() {
     ensure_path_entry "$HOME/.local/bin"
 
     # ── 3. Go ─────────────────────────────────────────────────────────────────
-    header "Go ${GO_VERSION}"
+    install_phase "Go ${GO_VERSION}"
     if cmd_exists go; then
         local current_go
         current_go=$(go version | grep -oP 'go\K[0-9.]+')
@@ -1143,7 +1387,7 @@ cmd_install() {
     mkdir -p "$TOOLS_DIR" "$LOCAL_BIN" "${TOOLS_DIR}/for_windows"
 
     # ── 5. Go-утилиты ─────────────────────────────────────────────────────────
-    header "Go-утилиты"
+    install_phase "Go-утилиты"
     for name in "${!GO_TOOLS[@]}"; do
         if is_go_tool "$name"; then
             success "$name уже установлен"
@@ -1155,7 +1399,7 @@ cmd_install() {
     done
 
     # ── 6. Git-репозитории ────────────────────────────────────────────────────
-    header "Git-репозитории (~/tools)"
+    install_phase "Git-репозитории (~/tools)"
     for name in "${!GIT_REPOS[@]}"; do
         local url commit
         url=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f1)
@@ -1179,7 +1423,7 @@ cmd_install() {
     done
 
     # ── 7. Chisel ─────────────────────────────────────────────────────────────
-    header "Chisel v${CHISEL_VERSION}"
+    install_phase "Chisel v${CHISEL_VERSION}"
     local chisel_dir="${TOOLS_DIR}/chisel"
     mkdir -p "$chisel_dir"
     if [ -x "${chisel_dir}/chisel" ]; then
@@ -1193,7 +1437,7 @@ cmd_install() {
     fi
 
     # ── 8. uv tools ──────────────────────────────────────────────────────────
-    header "uv tool install (Python-утилиты)"
+    install_phase "uv tool install (Python-утилиты)"
     for name in "${!UV_TOOLS[@]}"; do
         local ref repo_url dv source
         ref=$(uv_tool_ref "${UV_TOOLS[$name]}")
@@ -1245,7 +1489,7 @@ cmd_install() {
     done
 
     # ── 9. Бинарные утилиты ──────────────────────────────────────────────────
-    header "Бинарные утилиты (→ ~/.local/bin)"
+    install_phase "Бинарные утилиты (→ ~/.local/bin)"
     for name in "${!BINARY_TOOLS[@]}"; do
         if cmd_exists "$name"; then
             local ev
@@ -1295,7 +1539,7 @@ cmd_install() {
     done
 
     # ── 10. Venv-репозитории ─────────────────────────────────────────────────
-    header "Venv-репозитории (~/tools + обёртки)"
+    install_phase "Venv-репозитории (~/tools + обёртки)"
     for name in "${!VENV_REPOS[@]}"; do
         local url commit entrypoint extra_deps
         url=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f1)
@@ -1318,6 +1562,10 @@ cmd_install() {
             info "Клонирование $name..."
             git_clone_at_revision "$url" "$dir" "$commit"
             success "$name клонирован"
+        fi
+
+        if [ "$name" = "bloodhound-automation" ]; then
+            patch_bloodhound_automation_install "$dir"
         fi
 
         # venv + зависимости
@@ -1363,7 +1611,7 @@ WRAPPER_EOF
     done
 
     # ── 11. Windows-утилиты ──────────────────────────────────────────────────
-    header "Windows-утилиты (~/tools/for_windows)"
+    install_phase "Windows-утилиты (~/tools/for_windows)"
     for name in "${!WIN_TOOLS[@]}"; do
         local dest="${TOOLS_DIR}/for_windows/${name}"
         if [ -f "$dest" ]; then
@@ -1376,28 +1624,18 @@ WRAPPER_EOF
     done
 
     # ── 12. Шаблоны Nuclei ──────────────────────────────────────────────────
-    header "Шаблоны Nuclei"
+    install_phase "Шаблоны Nuclei"
     if cmd_exists nuclei; then
         info "Обновление шаблонов nuclei..."
         nuclei -update-templates -update-template-dir "${TOOLS_DIR}/nuclei-templates" 2>/dev/null || warn "Не удалось обновить шаблоны nuclei"
     fi
 
     # ── 13. BloodHound (через bloodhound-automation) ─────────────────────────
-    header "BloodHound (bloodhound-automation)"
+    install_phase "BloodHound (bloodhound-automation)"
     local bha_dir="${TOOLS_DIR}/bloodhound-automation"
     local bha_venv="${bha_dir}/.venv/bin/python"
     local bha_script="${bha_dir}/bloodhound-automation.py"
     if [ -x "$bha_venv" ] && [ -f "$bha_script" ]; then
-        # Увеличиваем таймауты healthcheck для Neo4j в шаблоне:
-        # плагин graph-data-science (~250 МБ) скачивается при первом запуске,
-        # стандартных 80 с (start_period 30 + 5×10) недостаточно.
-        local bha_tpl="${bha_dir}/templates/docker-compose.yml"
-        if [ -f "$bha_tpl" ]; then
-            sed -i '/^  graph-db:/,/^  [a-z]/ {
-                s/retries: 5/retries: 10/
-                s/start_period: 30s/start_period: 120s/
-            }' "$bha_tpl"
-        fi
         # Функция для запуска команды с правами docker (sg если группа свежая)
         run_bha() {
             if [ "$DOCKER_GROUP_FRESH" = true ]; then
@@ -1420,6 +1658,7 @@ WRAPPER_EOF
     fi
 
     # ── Готово ────────────────────────────────────────────────────────────────
+    progress_finish "Завершение"
     header "Установка завершена!"
     echo ""
     info "Перезагрузите оболочку или выполните:"
@@ -1465,8 +1704,8 @@ case "${1:-}" in
         echo "Использование:"
         echo "  $0                  — проверить наличие инструментов (без сети)"
         echo "  $0 --auto           — полностью автоматическая установка без вопросов (для curl | bash)"
-        echo "  $0 --check-updates  — проверить наличие новых версий относительно заданных в скрипте (рекомендуется VPN)"
-        echo "  $0 --install        — установить отсутствующие инструменты (нужен VPN)"
+        echo "  $0 --check-updates  — проверить наличие новых версий относительно заданных в скрипте (при необходимости задайте proxy)"
+        echo "  $0 --install        — установить отсутствующие инструменты (при необходимости задайте proxy)"
         echo "  $0 --skip <имя>     — пропустить текущее обновление для инструмента"
         echo "  $0 --unskip <имя>   — отменить пропуск обновления"
         echo "  $0 --skip-list      — показать пропущенные обновления"
