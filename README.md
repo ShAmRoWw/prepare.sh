@@ -1,6 +1,8 @@
 # prepare.sh
 
-Скрипт для развёртывания и поддержки набора инструментов внутреннего пентеста. Устанавливает утилиты из разных источников (apt, Go, uv/pip, git, бинарные релизы), отслеживает обновления через `git ls-remote` и управляет пропусками версий с синхронизацией между устройствами. Разрабатывался под Kali Linux - на других системах работоспособность не гарантирована.
+Скрипт для развёртывания и сопровождения набора инструментов внутреннего тестирования на проникновение на Kali/Debian-подобных системах. Устанавливает зависимости из apt, uv, Go, репозитории и релизы с GitHub и умеет проверять версии инструментов через git ls-remote.
+
+Исходным источником правды для версий, коммитов и URL остаётся сам [`prepare.sh`](./prepare.sh).
 
 ## Быстрый старт
 
@@ -8,7 +10,7 @@
 # Полностью автоматическая установка
 sudo -v && curl -fsSL https://raw.githubusercontent.com/ShAmRoWw/prepare.sh/refs/heads/main/prepare.sh | bash -s -- --auto
 
-# Запуск вручную
+# Ручной запуск из репозитория
 git clone https://github.com/ShAmRoWw/prepare.sh.git
 cd prepare.sh && chmod +x prepare.sh
 ./prepare.sh
@@ -16,88 +18,94 @@ cd prepare.sh && chmod +x prepare.sh
 
 ## Команды
 
-| Команда | Описание |
-|---------|----------|
-| `./prepare.sh` | Проверить наличие инструментов (без сети) |
-| `./prepare.sh --install` | Установить отсутствующие инструменты |
-| `./prepare.sh --auto` | Автоматическая установка без вопросов |
-| `./prepare.sh --check-updates` | Проверить наличие новых версий на remote |
-| `./prepare.sh --skip <имя>` | Пропустить текущее обновление инструмента |
-| `./prepare.sh --unskip <имя>` | Отменить пропуск обновления |
-| `./prepare.sh --skip-list` | Показать пропущенные обновления |
-| `./prepare.sh --skip-export` | Экспорт пропусков в stdout |
-| `./prepare.sh --skip-import <файл>` | Импорт пропусков из файла или stdin |
+| Команда | Что делает |
+|---------|------------|
+| `./prepare.sh` | Локально проверяет наличие инструментов без доступа к сети |
+| `./prepare.sh --install` | Устанавливает отсутствующие инструменты и зависимости |
+| `./prepare.sh --auto` | То же, что `--install`, но без интерактивных вопросов |
+| `./prepare.sh --check-updates` | Сравнивает версии инструментов, заданные в скрипте, с актуальными версиями из реопзиториев инструментов |
+| `./prepare.sh --skip <имя>` | Помечает текущее состояние инструмента как пропущенное при проверке на наличие обновлений |
+| `./prepare.sh --unskip <имя>` | Убирает пропуск |
+| `./prepare.sh --skip-list` | Показывает локальный список пропущенных обновлений |
+| `./prepare.sh --skip-export` | Печатает `skipped.conf` в stdout |
+| `./prepare.sh --skip-import <файл>` | Импортирует список пропущенных версий из файла или stdin |
 
 ## Что устанавливается
 
-**Системные зависимости:** git, curl, wget, python3-pip, libpcap-dev, seclists, docker, libkrb5-dev, wmctrl.
+**Системные пакеты (apt):** git, curl, wget, python3-pip, libpcap-dev, libkrb5-dev, seclists, wmctrl, docker.io, docker-compose.
 
-**Go:** указанная версия Go и утилиты: httpx, nuclei.
+**Go:** закрепленная в скрипте версия Go и утилиты httpx, nuclei.
 
-**Python (uv tool install):** netexec, impacket, certipy, bloodyAD, penelope, ldeep, msldap, dnsrecon, smbclient-ng, AD-Miner, pre2k, conpass, RITM.
+**Python через uv tool install:** penelope, netexec, bloodyAD, pre2k, smbclientng, AD-Miner, conpass, ldeep, certipy, dnsrecon, msldap, RITM, impacket, manspider.
+
+**Обычные репозитории (~/tools):** ntlmv1-multi.
 
 **Бинарные релизы:** pretender, rusthound-ce, kerbrute, legba, chisel.
 
-**Git-репозитории с venv:** krbrelayx, targetedKerberoast, ASRepCatcher, PCredz, pyLDAPWordlistHarvester, bloodhound-automation.
+**Репозитории с отдельным venv:** krbrelayx, bloodhound-automation, targetedKerberoast, pyLDAPWordlistHarvester, ASRepCatcher, PCredz.
 
-**Windows-утилиты:** Group3r.exe, Snaffler.exe (скачиваются в `~/tools/for_windows/`).
+**Утилиты Windows:** Group3r.exe, Snaffler.exe.
 
-**BloodHound:** автоматическое развёртывание через bloodhound-automation (Docker).
+**Дополнительно:** обновление шаблонов nuclei в ~/tools/nuclei-templates.
 
 ## Структура файлов
 
-```
-~/tools/                        — git-репозитории и venv-инструменты
-~/.local/bin/                   — обёртки и бинарники
-~/.local/share/prepare/         — логи установки и skip-конфигурация
-/usr/local/go/                  — Go
-~/go/bin/                       — Go-утилиты
+```text
+~/tools/                                   репозитории и рабочие директории инструментов
+~/tools/chisel/                            chisel
+~/tools/for_windows/                       утилиты для Windows
+~/tools/bloodhound-automation/projects/    проекты BloodHound
+~/tools/nuclei-templates/                  шаблоны nuclei
+~/.local/bin/                              wrapper скрипты и бинарники
+~/.local/share/prepare/                    логи установки, skipped.conf и служебные маркеры
+/usr/local/go/                             Go SDK
+~/go/bin/                                  Go утилиты
 ```
 
 ## Проверка обновлений
 
-`--check-updates` делает один запрос `git ls-remote` на каждый инструмент (параллельно) и сравнивает HEAD и теги с версиями, указанными в скрипте. Результаты:
+`--check-updates` параллельно делает запросы к репозиториям инструментов, получает версии и сравнивает их с заданными в коде скрипта:
 
-- ✓ **(актуально)** — remote совпадает с закреплённой версией
-- ↑ **→ новый тег / новые коммиты** — есть обновления
-- ✓ **(пропущено: abc123)** — обновление пропущено через `--skip`
+- `✓ (актуально)` — удаленный коммит/тег совпадает с зафиксированным;
+- `↑` — в актуальной версии репозитория появился новый тег или новые коммиты;
+- `✓ (пропущено: ...)` — обновление было помечено через `--skip`.
 
-Для обновления инструмента измените версию/коммит в конфигурации скрипта и запустите `--install`.
+Важно: --check-updates только показывает расхождения. Он не меняет установку, а --install не выполняет полноценное обновление уже существующих инструментов.
 
-## Пропуск обновлений (skip)
+## Список пропущенных версий и синхронизация
 
-Если обновление нежелательно, `--skip <имя>` запоминает текущий HEAD remote и при следующем `--check-updates` он будет отображаться как актуальный. Новые коммиты после пропущенного HEAD снова покажут обновление.
+`--skip <имя>` запоминает текущий HEAD репозитория как сознательно пропущенный. Если после этого последняя версия двинется дальше, `--check-updates` снова покажет обновление.
 
-### Синхронизация списка пропущенных версий между устройствами
+Для синхронизации между машинами можно использовать приватный GitHub Gist, для этого:
 
-Список пропущенных версий инструментов можно синхронизировать через приватный GitHub Gist.
+1. Создайте приватный gist с файлом `skipped.conf`.
+2. Проверьте значение `SKIP_GIST_ID` в начале скрипта. Подставьте ID своего gist'а или оставьте пустую строку, чтобы полностью отключить синхронизацию.
+3. Создайте Classic PAT (Personal Access Token) и в скоупе выберите только `gist`.
 
-**Настройка:**
+Поведение:
 
-1. Создать приватный gist с файлом `skipped.conf`.
-2. Скопировать ID гиста из URL и заменить переменную `SKIP_GIST_ID` в начале скрипта.
-3. Создать Personal Access Token: [github.com/settings/tokens](https://github.com/settings/tokens) → Generate new token (classic) → scope **gist**.
+- чтение файла происходит при `--check-updates`, `--skip` и `--unskip`;
+- при записи (`--skip`, `--unskip`) токен запрашивается интерактивно и не сохраняется на диск;
+- при пустом `SKIP_GIST_ID` всё работает только локально.
 
-**Как работает:**
+Ручной перенос между машинами тоже поддерживается:
 
-- **Чтение** (при `--check-updates`, `--skip`, `--unskip`) — автоматически скачивает skip-файл из Gist API без токена и заменяет локальный.
-- **Запись** (при `--skip`, `--unskip`) — после изменения интерактивно запрашивает токен для push в Gist. Токен нигде не сохраняется. Можно нажать Enter, чтобы пропустить push — изменения останутся только локальными.
-- **Без настройки** — если `SKIP_GIST_ID` пуст, всё работает только локально.
-
-Также доступен ручной экспорт/импорт:
 ```bash
 ./prepare.sh --skip-export > skips.conf
 scp skips.conf user@host2:~/
 ssh host2 './prepare.sh --skip-import skips.conf'
 ```
 
-## Sudo-обёртки
+## Sudo обёртки
 
-Инструменты, требующие привилегий (pretender, RITM, PCredz, ASRepCatcher), автоматически оборачиваются в sudo-обёртку: оригинал переименовывается в `.name.orig`, а на его месте создаётся скрипт, вызывающий оригинал через `sudo`.
+Для `pretender`, `RITM`, `PCredz` и `ASRepCatcher` скрипт создаёт sudo обёртку в `~/.local/bin`: исходный исполняемый файл переименовывается в `*.orig`, а обёртка запускает его через `sudo`.
 
 ## Требования
 
-- Debian/Ubuntu-based дистрибутив (apt)
-- Архитектура x86_64
-- bash ≥ 4.4 (ассоциативные массивы)
-- Доступ в интернет
+- Kali, Debian или Ubuntu-подобная система с `apt`
+- `bash` 4.4+
+- архитектура `x86_64`
+- доступ в интернет
+- `sudo` для установки пакетов и Docker
+
+Скрипт разрабатывался под Kali Linux, так что на других дистрибутивах совместимость не гарантируется.

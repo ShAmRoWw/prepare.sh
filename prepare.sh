@@ -30,6 +30,8 @@ TOOLS_DIR="$HOME/tools"
 LOCAL_BIN="$HOME/.local/bin"
 LOG_DIR="$HOME/.local/share/prepare"
 SKIP_FILE="$HOME/.local/share/prepare/skipped.conf"
+FIRST_INSTALL_MARKER="$HOME/.local/share/prepare/first_install_done"
+KALI_CLEANUP_DECISION_FILE="$HOME/.local/share/prepare/kali_cleanup_decision"
 
 # ─── Remote-синхронизация skip-списка через GitHub Gist ───────────────────────
 # Заполните SKIP_GIST_ID идентификатором приватного гиста для синхронизации
@@ -118,6 +120,14 @@ declare -A KNOWN_BINARIES=(
     [AD-Miner]="AD-Miner"
 )
 
+declare -a KALI_PREINSTALLED_TOOLS=( netexec msldap dnsrecon )
+declare -A KALI_SYSTEM_PACKAGES=(
+    [netexec]="netexec"
+    [msldap]="python3-msldap"
+    [dnsrecon]="dnsrecon"
+)
+declare -A SUPPRESS_UV_FORCE_PROMPTS=()
+
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
 
 info()    { echo -e "${BLUE}[*]${NC} $*"; }
@@ -126,11 +136,50 @@ warn()    { echo -e "${YELLOW}[!]${NC} $*"; }
 error()   { echo -e "${RED}[-]${NC} $*"; }
 header()  { echo -e "\n${CYAN}══════════════════════════════════════════${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}══════════════════════════════════════════${NC}"; }
 
+declare -a EXIT_HOOKS=()
+declare -a WINCH_HOOKS=()
+PROGRESS_TTY_QUERY_FD=4
+
+run_exit_hooks() {
+    local status=$?
+    local i
+    for (( i=${#EXIT_HOOKS[@]} - 1; i>=0; i-- )); do
+        eval "${EXIT_HOOKS[$i]}" || true
+    done
+    return "$status"
+}
+
+run_winch_hooks() {
+    local hook
+    for hook in "${WINCH_HOOKS[@]}"; do
+        eval "$hook" || true
+    done
+}
+
+register_exit_hook() {
+    EXIT_HOOKS+=("$1")
+    trap run_exit_hooks EXIT
+}
+
+register_winch_hook() {
+    WINCH_HOOKS+=("$1")
+    trap run_winch_hooks WINCH
+}
+
 PROGRESS_TOTAL=0
 PROGRESS_CURRENT=0
 PROGRESS_WIDTH=32
+PROGRESS_LABEL=""
+PROGRESS_FOOTER_ENABLED=false
+PROGRESS_FOOTER_TRIED=false
+PROGRESS_FOOTER_SUSPENDED=false
+PROGRESS_CURSOR_ROW=1
+PROGRESS_CURSOR_COL=1
+PROGRESS_FOOTER_ROWS=0
+PROGRESS_FOOTER_LAST_ROW=0
+PROGRESS_FOOTER_SCROLL_BOTTOM=0
 
-progress_render() {
+progress_format_line() {
     local current="$1" total="$2" label="$3"
     [ "$total" -gt 0 ] || return 0
 
@@ -144,7 +193,173 @@ progress_render() {
     printf -v pending_bar '%*s' "$empty" ''
     pending_bar=${pending_bar// /-}
 
-    echo -e "${DIM}[${done_bar}${pending_bar}]${NC} ${current}/${total} ${label}"
+    printf '%b[%s%s]%b %s/%s %s' \
+        "$DIM" "$done_bar" "$pending_bar" "$NC" "$current" "$total" "$label"
+}
+
+progress_footer_capture_size() {
+    local tty_size tty_rows
+    if [ -t "$PROGRESS_TTY_QUERY_FD" ]; then
+        tty_size=$(stty size <&"$PROGRESS_TTY_QUERY_FD" 2>/dev/null || true)
+    else
+        tty_size=$(stty size < /dev/tty 2>/dev/null || true)
+    fi
+    tty_rows=${tty_size%% *}
+
+    if [[ ! "$tty_rows" =~ ^[0-9]+$ ]] || [ "$tty_rows" -lt 2 ]; then
+        tty_rows=$(tput lines 2>/dev/null || true)
+    fi
+
+    [[ "$tty_rows" =~ ^[0-9]+$ ]] || return 1
+    [ "$tty_rows" -ge 2 ] || return 1
+
+    PROGRESS_FOOTER_ROWS="$tty_rows"
+    PROGRESS_FOOTER_LAST_ROW=$((PROGRESS_FOOTER_ROWS - 1))
+    PROGRESS_FOOTER_SCROLL_BOTTOM=$((PROGRESS_FOOTER_ROWS - 2))
+}
+
+progress_capture_cursor() {
+    local old_stty response row col
+
+    [ -t "$PROGRESS_TTY_QUERY_FD" ] || return 1
+
+    old_stty=$(stty -g <&"$PROGRESS_TTY_QUERY_FD" 2>/dev/null) || return 1
+    stty -echo -icanon min 0 time 0 <&"$PROGRESS_TTY_QUERY_FD" 2>/dev/null || return 1
+
+    printf '\033[6n' >&"$PROGRESS_TTY_QUERY_FD"
+    IFS=';' read -r -u "$PROGRESS_TTY_QUERY_FD" -d R -t 0.5 response col || true
+    stty "$old_stty" <&"$PROGRESS_TTY_QUERY_FD" 2>/dev/null || true
+
+    row=${response#*[}
+    [[ "$row" =~ ^[0-9]+$ && "$col" =~ ^[0-9]+$ ]] || return 1
+
+    PROGRESS_CURSOR_ROW="$row"
+    PROGRESS_CURSOR_COL="$col"
+}
+
+progress_footer_draw() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 1
+    [ "$PROGRESS_FOOTER_SUSPENDED" = true ] && return 0
+
+    local line
+    line=$(progress_format_line "$PROGRESS_CURRENT" "$PROGRESS_TOTAL" "$PROGRESS_LABEL")
+
+    tput sc 2>/dev/null || true
+    tput cup "$PROGRESS_FOOTER_LAST_ROW" 0 2>/dev/null || true
+    tput el 2>/dev/null || true
+    printf '%b' "$line"
+    tput rc 2>/dev/null || true
+}
+
+progress_footer_apply_layout() {
+    local restore_row restore_col
+
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 1
+    [ "$PROGRESS_FOOTER_SUSPENDED" = true ] && return 0
+    progress_footer_capture_size || return 1
+
+    restore_row=$((PROGRESS_FOOTER_SCROLL_BOTTOM + 1))
+    restore_col=1
+    if progress_capture_cursor; then
+        restore_row="$PROGRESS_CURSOR_ROW"
+        restore_col="$PROGRESS_CURSOR_COL"
+    fi
+
+    [ "$restore_row" -lt 1 ] && restore_row=1
+    [ "$restore_col" -lt 1 ] && restore_col=1
+    if [ "$restore_row" -gt $((PROGRESS_FOOTER_SCROLL_BOTTOM + 1)) ]; then
+        restore_row=$((PROGRESS_FOOTER_SCROLL_BOTTOM + 1))
+        restore_col=1
+    fi
+
+    tput csr 0 "$PROGRESS_FOOTER_SCROLL_BOTTOM" 2>/dev/null || return 1
+    tput cup "$PROGRESS_FOOTER_LAST_ROW" 0 2>/dev/null || true
+    tput el 2>/dev/null || true
+    printf '%b' "$(progress_format_line "$PROGRESS_CURRENT" "$PROGRESS_TOTAL" "$PROGRESS_LABEL")"
+    tput cup $((restore_row - 1)) $((restore_col - 1)) 2>/dev/null || true
+}
+
+progress_footer_handle_winch() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 0
+    if [ "$PROGRESS_FOOTER_SUSPENDED" = true ]; then
+        progress_footer_capture_size || true
+        return 0
+    fi
+    progress_footer_apply_layout || true
+}
+
+progress_footer_suspend() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 0
+    [ "$PROGRESS_FOOTER_SUSPENDED" = true ] && return 0
+
+    tput sc 2>/dev/null || true
+    tput csr 0 $((PROGRESS_FOOTER_ROWS - 1)) 2>/dev/null || true
+    tput cup "$PROGRESS_FOOTER_LAST_ROW" 0 2>/dev/null || true
+    tput el 2>/dev/null || true
+    tput rc 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+
+    PROGRESS_FOOTER_SUSPENDED=true
+}
+
+progress_footer_resume() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 0
+    [ "$PROGRESS_FOOTER_SUSPENDED" = true ] || return 0
+
+    PROGRESS_FOOTER_SUSPENDED=false
+    tput civis 2>/dev/null || true
+    progress_footer_apply_layout || true
+}
+
+progress_footer_cleanup() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] || return 0
+
+    tput sc 2>/dev/null || true
+    tput csr 0 $((PROGRESS_FOOTER_ROWS - 1)) 2>/dev/null || true
+    tput cup "$PROGRESS_FOOTER_LAST_ROW" 0 2>/dev/null || true
+    tput el 2>/dev/null || true
+    tput rc 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+
+    PROGRESS_FOOTER_ENABLED=false
+    PROGRESS_FOOTER_SUSPENDED=false
+}
+
+progress_footer_init() {
+    [ "$PROGRESS_FOOTER_ENABLED" = true ] && return 0
+    [ "$PROGRESS_FOOTER_TRIED" = true ] && return 1
+    PROGRESS_FOOTER_TRIED=true
+
+    command -v tput >/dev/null 2>&1 || return 1
+    if ! exec 4<>/dev/tty 2>/dev/null; then
+        return 1
+    fi
+    register_exit_hook "exec 4>&- 4<&-"
+
+    PROGRESS_FOOTER_ENABLED=true
+    register_exit_hook "progress_footer_cleanup"
+    register_winch_hook "progress_footer_handle_winch"
+    tput civis 2>/dev/null || true
+
+    if ! progress_footer_apply_layout; then
+        progress_footer_cleanup
+        return 1
+    fi
+}
+
+progress_render() {
+    local current="$1" total="$2" label="$3"
+    [ "$total" -gt 0 ] || return 0
+
+    PROGRESS_CURRENT="$current"
+    PROGRESS_TOTAL="$total"
+    PROGRESS_LABEL="$label"
+
+    if progress_footer_init; then
+        progress_footer_draw
+    else
+        printf '%b\n' "$(progress_format_line "$current" "$total" "$label")"
+    fi
 }
 
 progress_start() {
@@ -192,6 +407,31 @@ is_go_tool() {
 }
 
 needs_sudo() { [[ -v "SUDO_REQUIRED[$1]" ]]; }
+
+is_first_install_run() { [ ! -f "$FIRST_INSTALL_MARKER" ]; }
+
+mark_first_install_done() {
+    mkdir -p "$(dirname "$FIRST_INSTALL_MARKER")"
+    : > "$FIRST_INSTALL_MARKER"
+}
+
+get_kali_cleanup_decision() {
+    [ -f "$KALI_CLEANUP_DECISION_FILE" ] || return 0
+    tr -d '[:space:]' < "$KALI_CLEANUP_DECISION_FILE" 2>/dev/null || true
+}
+
+set_kali_cleanup_decision() {
+    mkdir -p "$(dirname "$KALI_CLEANUP_DECISION_FILE")"
+    printf '%s\n' "$1" > "$KALI_CLEANUP_DECISION_FILE"
+}
+
+is_kali() {
+    [ -r /etc/os-release ] || return 1
+    local os_id os_like
+    os_id=$( . /etc/os-release; printf '%s' "${ID:-}" )
+    os_like=$( . /etc/os-release; printf '%s' "${ID_LIKE:-}" )
+    [[ "$os_id" == "kali" || "$os_like" == *kali* ]]
+}
 
 # Оборачивает бинарник в sudo-обёртку: переименовывает оригинал в .name.orig
 wrap_with_sudo() {
@@ -278,6 +518,24 @@ export_proxy_settings() {
 
 sudo_with_proxy() {
     sudo "${PROXY_ENV_ARGS[@]}" "$@"
+}
+
+prompt_read() {
+    local var_name="$1" prompt="$2"
+    progress_footer_suspend
+    read -rp "$prompt" "$var_name"
+    local status=$?
+    progress_footer_resume
+    return "$status"
+}
+
+prompt_read_secret() {
+    local var_name="$1" prompt="$2"
+    progress_footer_suspend
+    read -rsp "$prompt" "$var_name"
+    local status=$?
+    progress_footer_resume
+    return "$status"
 }
 
 patch_bloodhound_automation_compose_file() {
@@ -482,6 +740,151 @@ uv_tool_source() {
     fi
 }
 
+should_suppress_uv_force_prompt() {
+    [[ -v "SUPPRESS_UV_FORCE_PROMPTS[$1]" ]]
+}
+
+package_owner_for_path() {
+    local path="$1" owner="" resolved=""
+
+    owner=$(dpkg-query -S "$path" 2>/dev/null | awk -F: 'NR==1 { print $1 }') || true
+    if [ -n "$owner" ]; then
+        printf '%s\n' "$owner"
+        return 0
+    fi
+
+    resolved=$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")
+    if [ "$resolved" != "$path" ]; then
+        owner=$(dpkg-query -S "$resolved" 2>/dev/null | awk -F: 'NR==1 { print $1 }') || true
+        if [ -n "$owner" ]; then
+            printf '%s\n' "$owner"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+list_kali_preinstalled_candidates() {
+    local name src cmd_path owner expected_pkg
+
+    for name in "${KALI_PREINSTALLED_TOOLS[@]}"; do
+        src=$(uv_tool_source "$name")
+        expected_pkg="${KALI_SYSTEM_PACKAGES[$name]:-}"
+        case "$src" in
+            pipx|system)
+                cmd_path=$(command -v "$name" 2>/dev/null || true)
+                owner=""
+                if [ "$src" = "system" ] && [ -n "$expected_pkg" ] && dpkg -s "$expected_pkg" &>/dev/null; then
+                    owner="$expected_pkg"
+                elif [ "$src" = "system" ] && [ -n "$cmd_path" ]; then
+                    owner=$(package_owner_for_path "$cmd_path" 2>/dev/null || true)
+                fi
+                printf '%s|%s|%s|%s\n' "$name" "$src" "$cmd_path" "$owner"
+                ;;
+            "")
+                if [ -n "$expected_pkg" ] && dpkg -s "$expected_pkg" &>/dev/null; then
+                    printf '%s|system||%s\n' "$name" "$expected_pkg"
+                fi
+                ;;
+        esac
+    done
+}
+
+remove_preinstalled_tool() {
+    local name="$1" src="$2" cmd_path="$3" owner="$4"
+
+    if [ "$src" = "pipx" ]; then
+        if ! cmd_exists pipx; then
+            warn "$name: pipx не найден, удаление пропущено"
+            return 1
+        fi
+        info "Удаление $name из pipx..."
+        if pipx uninstall "$name"; then
+            success "$name удалён из pipx"
+            return 0
+        fi
+        warn "$name: не удалось удалить из pipx"
+        return 1
+    fi
+
+    if [ -z "$owner" ]; then
+        warn "$name: не удалось определить apt-пакет для ${cmd_path:-неизвестного пути}, удаление пропущено"
+        return 1
+    fi
+
+    info "Удаление $name через apt (${owner})..."
+    if sudo_with_proxy DEBIAN_FRONTEND=noninteractive apt-get remove -y "$owner"; then
+        success "$name удалён (${owner})"
+        return 0
+    fi
+
+    warn "$name: не удалось удалить пакет ${owner}"
+    return 1
+}
+
+handle_first_install_kali_cleanup() {
+    is_first_install_run || return 0
+    is_kali || return 0
+
+    local decision
+    decision=$(get_kali_cleanup_decision)
+
+    local candidates=()
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        candidates+=("$line")
+    done < <(list_kali_preinstalled_candidates)
+
+    [ ${#candidates[@]} -gt 0 ] || return 0
+
+    if [ "$decision" = "keep" ]; then
+        info "Первая установка на Kali: предустановленные netexec/msldap/dnsrecon оставлены по ранее сохранённому решению"
+        for line in "${candidates[@]}"; do
+            local name
+            IFS='|' read -r name _ <<< "$line"
+            SUPPRESS_UV_FORCE_PROMPTS["$name"]=1
+        done
+        return 0
+    fi
+
+    warn "На Kali обнаружены предустановленные версии инструментов, которые скрипт обычно ставит через uv:"
+    for line in "${candidates[@]}"; do
+        local name src cmd_path owner details=""
+        IFS='|' read -r name src cmd_path owner <<< "$line"
+        details="$src"
+        [ -n "$cmd_path" ] && details+="; ${cmd_path}"
+        [ -n "$owner" ] && details+="; ${owner}"
+        echo -e "  ${YELLOW}-${NC} ${name} ${DIM}(${details})${NC}"
+    done
+
+    if [ "$AUTO_MODE" = true ]; then
+        warn "Автоматический режим: удаление предустановленных Kali-инструментов пропущено"
+        return 0
+    fi
+
+    local cleanup_answer
+    prompt_read cleanup_answer "Удалить их сейчас, чтобы затем установить закреплённые версии через uv? [Y/n]: "
+    if [[ "$cleanup_answer" =~ ^[Nn]$ ]]; then
+        set_kali_cleanup_decision "keep"
+        for line in "${candidates[@]}"; do
+            local name
+            IFS='|' read -r name _ <<< "$line"
+            SUPPRESS_UV_FORCE_PROMPTS["$name"]=1
+        done
+        info "Предустановленные Kali-инструменты оставлены без изменений"
+        return 0
+    fi
+
+    set_kali_cleanup_decision "remove"
+    for line in "${candidates[@]}"; do
+        local name src cmd_path owner
+        IFS='|' read -r name src cmd_path owner <<< "$line"
+        remove_preinstalled_tool "$name" "$src" "$cmd_path" "$owner" || true
+    done
+}
+
 # ─── Проверка обновлений через git ls-remote (без локального репо) ────────────
 #
 # Один сетевой запрос на инструмент: git ls-remote $url HEAD 'refs/tags/*'
@@ -606,9 +1009,9 @@ configure_proxy() {
     echo ""
 
     if [ -n "$current_http" ]; then
-        read -rp "HTTP proxy [${current_http}] (Enter — оставить, '-' — убрать): " http_answer
+        prompt_read http_answer "HTTP proxy [${current_http}] (Enter — оставить, '-' — убрать): "
     else
-        read -rp "HTTP proxy (например http://127.0.0.1:8080, Enter — без proxy): " http_answer
+        prompt_read http_answer "HTTP proxy (например http://127.0.0.1:8080, Enter — без proxy): "
     fi
     case "$http_answer" in
         "") ;;
@@ -617,9 +1020,9 @@ configure_proxy() {
     esac
 
     if [ -n "$current_https" ]; then
-        read -rp "HTTPS proxy [${current_https}] (Enter — оставить, '=' — как HTTP, '-' — убрать): " https_answer
+        prompt_read https_answer "HTTPS proxy [${current_https}] (Enter — оставить, '=' — как HTTP, '-' — убрать): "
     else
-        read -rp "HTTPS proxy (Enter — как HTTP proxy, '-' — без proxy): " https_answer
+        prompt_read https_answer "HTTPS proxy (Enter — как HTTP proxy, '-' — без proxy): "
     fi
     case "$https_answer" in
         "")
@@ -742,7 +1145,7 @@ gist_push() {
         return 0
     fi
 
-    read -rsp "GitHub Token (scope: gist) для push в Gist (Enter — пропустить): " token
+    prompt_read_secret token "GitHub Token (scope: gist) для push в Gist (Enter — пропустить): "
     echo ""
     [ -z "$token" ] && { warn "Токен не указан — skip-изменения сохранены только локально"; return 0; }
 
@@ -990,7 +1393,7 @@ cmd_check_updates() {
     # ── Фаза 1: параллельный запрос всех remote ─────────────────────────────
     local _chk_dir
     _chk_dir=$(mktemp -d)
-    trap "rm -rf '$_chk_dir'" EXIT
+    register_exit_hook "rm -rf '$_chk_dir'"
 
     info "Запрос remote (параллельно)..."
 
@@ -1272,13 +1675,13 @@ cmd_install() {
     # ── Логирование ───────────────────────────────────────────────────────────
     mkdir -p "$LOG_DIR"
     LOG_FILE="${LOG_DIR}/install_$(date '+%Y-%m-%d_%H-%M-%S').log"
-    exec > >(tee -a "$LOG_FILE") 2>&1
+    exec 3>&1
+    register_exit_hook "exec 3>&-"
+    exec > >(tee >(perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\e[78]//g' >> "$LOG_FILE")) 2>&1
     info "Лог: ${LOG_FILE}"
 
     # ── 0. Предварительные проверки ───────────────────────────────────────────
     header "Установка инструментов"
-    progress_start "$install_phase_total" "Подготовка"
-
     if [ "$(id -u)" -eq 0 ]; then
         error "Не запускайте этот скрипт от root. sudo будет запрошен где нужно."
         exit 1
@@ -1297,9 +1700,10 @@ cmd_install() {
     # Фоновое обновление метки sudo каждые 50 секунд
     ( while true; do sleep 50; sudo -n -v 2>/dev/null; done ) &
     SUDO_KEEPALIVE_PID=$!
-    trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
+    register_exit_hook "kill $SUDO_KEEPALIVE_PID 2>/dev/null"
 
     configure_proxy
+    progress_start "$install_phase_total" "Подготовка"
 
     # ── 1. apt (обновляем Git в первую очередь для --revision) ────────────────
     install_phase "Системные пакеты (apt)"
@@ -1436,6 +1840,8 @@ cmd_install() {
         success "chisel → ${chisel_dir}/chisel"
     fi
 
+    handle_first_install_kali_cleanup
+
     # ── 8. uv tools ──────────────────────────────────────────────────────────
     install_phase "uv tool install (Python-утилиты)"
     for name in "${!UV_TOOLS[@]}"; do
@@ -1459,10 +1865,13 @@ cmd_install() {
             if [ "$AUTO_MODE" = true ]; then
                 warn "$name установлен не через uv ($sys_bin), используется как есть"
                 continue
+            elif should_suppress_uv_force_prompt "$name"; then
+                warn "$name найден в системе: $sys_bin (источник: $src), оставлен по ранее выбранному решению"
+                continue
             else
                 warn "$name найден в системе: $sys_bin (источник: $src)"
                 warn "Рекомендуется установить через uv для единообразного управления версиями"
-                read -rp "Установить $name через uv (--force)? [y/N]: " replace_answer
+                prompt_read replace_answer "Установить $name через uv (--force)? [y/N]: "
                 if [[ ! "$replace_answer" =~ ^[Yy]$ ]]; then
                     info "Пропуск $name"
                     continue
@@ -1659,6 +2068,7 @@ WRAPPER_EOF
 
     # ── Готово ────────────────────────────────────────────────────────────────
     progress_finish "Завершение"
+    mark_first_install_done
     header "Установка завершена!"
     echo ""
     info "Перезагрузите оболочку или выполните:"
