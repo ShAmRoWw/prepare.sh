@@ -8,11 +8,13 @@
 #   ./prepare.sh --install       — установить отсутствующие инструменты
 #   ./prepare.sh --auto          — полностью автоматическая установка (без вопросов)
 #   ./prepare.sh --check-updates — сверить, есть ли новые версии на remote
+#   ./prepare.sh --auto --proxy-all — использовать заданный proxy на всех этапах
 #
 # Параллелизм установки и проверки обновлений:
 # PREPARE_INSTALL_JOBS=1..16 (по умолчанию 4).
 #
-# ВАЖНО: --install, --auto и --check-updates используют сеть; при необходимости задайте HTTP/HTTPS proxy.
+# Proxy по умолчанию применяется только к bloodhound-automation.
+# --proxy-all включает его для всех сетевых операций, в том числе --check-updates.
 #
 # Быстрый старт (curl):
 #   curl -fsSL https://raw.githubusercontent.com/ShAmRoWw/prepare.sh/refs/heads/main/prepare.sh | bash -s -- --auto
@@ -22,7 +24,7 @@ set -euo pipefail
 # ─── Цвета ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
+YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 DIM='\033[2m'
@@ -47,6 +49,9 @@ TMUX_LOG_DIR="$HOME/tmux_logs"
 SKIP_GIST_ID="87ba4463703d9c46cf2c969091992e28"
 SKIP_GIST_FILE="skipped.conf"
 declare -a PROXY_ENV_ARGS=()
+declare -A PROXY_SETTINGS=()
+PROXY_SCOPE=bloodhound
+PROXY_INITIALIZED=false
 
 # Число независимых установок, выполняемых одновременно. Значение можно
 # переопределить через PREPARE_INSTALL_JOBS=1..16.
@@ -62,35 +67,36 @@ done
 unset _p
 
 # Версия Go для новой установки. Уже установленный Go скрипт не заменяет.
-GO_VERSION="1.26.5"
-GO_LINUX_AMD64_SHA256="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+GO_VERSION="1.27.1"
+GO_LINUX_AMD64_SHA256="63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
 
 # uv tools: [имя]="версия|URL_репозитория|ветка_для_проверки_обновлений"
 # Устанавливается как: uv tool install "git+${URL}@${версия}"
 declare -A UV_TOOLS=(
     [penelope]="v0.21.0|https://github.com/brightio/penelope"
     [ntlmv1-multi]="c17f17df4c0355eb32c0392cdf0fc6178c99a10d|https://github.com/evilmog/ntlmv1-multi"
-    [wsuks]="f3dc49f4de2f6f48a9c2b35d25e6291804829ee4|https://github.com/NeffIsBack/wsuks"
+    [wsuks]="7e0a179e01d3468e69ec9c457b6def94b8abf4b0|https://github.com/NeffIsBack/wsuks"
     [pyGPOAbuse]="c18e1de919ed465f6b55104d596f7eabba6b9668|https://github.com/Hackndo/pyGPOAbuse"
     [bloodhound-ce-python]="6fa5ba5e553d061c253c323ccc59c3cbb96f4593|https://github.com/dirkjanm/BloodHound.py|bloodhound-ce"
-    [netexec]="80317f12eada2e308eb0f34119b702f6d6cc19e5|https://github.com/Pennyw0rth/NetExec"
-    [bloodyAD]="341fa041736b565f91640af0676970ac6a7dd80f|https://github.com/CravateRouge/bloodyAD"
+    [netexec]="a0a37b7af81d1ce687ce5a1ac66a5867708f51f8|https://github.com/Pennyw0rth/NetExec"
+    [bloodyAD]="0328081cbe9e615be8d33345ec0832f83e67aa80|https://github.com/CravateRouge/bloodyAD"
     [pre2k]="c2671c3bff87566572baf81d8106d819b7c89275|https://github.com/garrettfoster13/pre2k"
     [smbclientng]="3a8a902a5861416a324878b39378879a46cbf3ed|https://github.com/p0dalirius/smbclient-ng"
     [AD-Miner]="v1.9.0|https://github.com/AD-Security/AD_Miner"
-    [conpass]="8b22245cb0cf22bb63b27a85c64a23eb1848be17|https://github.com/login-securite/conpass"
+    [conpass]="a55bc35b882ae6c6b604a9835142a65b807093d4|https://github.com/login-securite/conpass"
     [ldeep]="2.0.3|https://github.com/franc-pentest/ldeep"
     [certipy]="5.1.0|https://github.com/ly4k/Certipy"
     [dnsrecon]="1.6.3|https://github.com/darkoperator/dnsrecon"
-    [msldap]="46d4dc60dc2e4739c188a848b090dcc064d7888d|https://github.com/skelsec/msldap"
-    [RITM]="e442b5c9b85c0a6a387491182472e3d3fbcf97fb|https://github.com/Tw1sm/RITM"
-    [impacket]="df6a18adcaf7a11138a25d70f94cbe15824cf3b1|https://github.com/fortra/impacket"
-    [manspider]="dd76e9c9c460537828bb0143d23bba0b7c9f5185|https://github.com/blacklanternsecurity/MANSPIDER"
+    [msldap]="8955a87a365da972319076b0fb00b670865b9880|https://github.com/skelsec/msldap"
+    [RITM]="b81e51222eb33f8ecd4a95b9fb0809a3a4ad0e1c|https://github.com/Tw1sm/RITM"
+    [impacket]="c38d1eeb6cd284633ed161689c5d81841d4678b8|https://github.com/fortra/impacket"
+    [manspider]="52cf157e281c6e4ae91230b2a60de54a2fe502a9|https://github.com/ShAmRoWw/MANSPIDER|main"
 )
 
 # uv-инструменты, которым нужен конкретный управляемый Python.
 declare -A UV_TOOL_PYTHON=(
     [ntlmv1-multi]="3.14"
+    [manspider]="3.12"
 )
 
 # uv-инструменты, которым нужны модули из системного Python. Для них uv
@@ -139,11 +145,12 @@ declare -A GIT_REPOS=()
 declare -A BINARY_TOOLS=(
     [pretender]="v1.4.1|https://github.com/RedTeamPentesting/pretender/releases/download/v1.4.1/pretender_Linux_x86_64.tar.gz|tar.gz|pretender"
     [flashingestor]="v0.4.1|https://github.com/Macmod/flashingestor/releases/download/v0.4.1/flashingestor-linux-amd64.tar.gz|tar.gz|flashingestor-linux-amd64"
-    [rusthound-ce]="v2.4.91|https://github.com/g0h4n/RustHound-CE/releases/download/v2.4.91/rusthound-ce-Linux-gnu-x86_64.tar.gz|tar.gz|rusthound-ce"
+    [rusthound-ce]="v2.5.14|https://github.com/g0h4n/RustHound-CE/releases/download/v2.5.14/rusthound-ce-Linux-gnu-x86_64.tar.gz|tar.gz|rusthound-ce"
     [kerbrute]="v1.0.3|https://github.com/ropnop/kerbrute/releases/download/v1.0.3/kerbrute_linux_amd64|binary|kerbrute"
     [legba]="1.3.0|https://github.com/evilsocket/legba/releases/download/1.3.0/legba-1.3.0-linux-x86_64.tar.gz|tar.gz|legba-1.3.0-linux-x86_64/legba"
     [bettercap]="v2.41.7|https://github.com/bettercap/bettercap/releases/download/v2.41.7/bettercap_linux_amd64.zip|zip|bettercap"
-    [gowitness]="3.1.1|https://github.com/sensepost/gowitness/releases/download/3.1.1/gowitness-3.1.1-linux-amd64|binary|gowitness|57b3188e24782c27fdf72493ce599537efd3187d03b80f8afe733c72d68c5517"
+    [gowitness]="3.2.0|https://github.com/sensepost/gowitness/releases/download/3.2.0/gowitness-3.2.0-linux-amd64|binary|gowitness|d315bf505691ea64a87f6231a757acfee0a94c024ab3531f35b3c52dad15895e"
+    [trufflehog]="v3.97.9|https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.9/trufflehog_3.97.9_linux_amd64.tar.gz|tar.gz|trufflehog|2e0a09c37d104c2f3069021f0c1ab33cf07287b6aca4d59eb4684d7d73fb89b4"
 )
 
 # Дополнительные CLI из того же release-артефакта:
@@ -153,7 +160,7 @@ declare -A BINARY_TOOL_EXTRA_COMMANDS=(
 )
 
 # Chisel
-CHISEL_VERSION="1.11.8"
+CHISEL_VERSION="1.12.0"
 CHISEL_URL="https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_amd64.gz"
 
 # Вариант Impacket с параметром --remove-mic-partial для CVE-2025-33073.
@@ -170,8 +177,8 @@ declare -A VENV_REPOS=(
     [PCredz]="https://github.com/lgandx/PCredz.git|a07051d392b50bded1a19734cb70f97010cd90a5|Pcredz|pcapy-ng"
     [CVE-2025-33073]="https://github.com/mverschu/CVE-2025-33073.git|13f6aa8199c1fb00788c1500015008b7b53c2322|CVE-2025-33073.py|"
     [gssapi-abuse]="https://github.com/CCob/gssapi-abuse.git|cc71152dbf0f1ca0cb4e6819fc9f66621231e50c|gssapi-abuse.py|"
-    [CVE-2026-54121]="https://github.com/aniqfakhrul/CVE-2026-54121.git|9f2242fc1a507c5be6e53d954a7d58b25126cd28|certighost.py|impacket,cryptography,asn1crypto,pycryptodomex,pyasn1"
-    [SCCMSecrets]="https://github.com/synacktiv/SCCMSecrets.git|55f9b9671218d0160fbe914ad1c8c5a9ebe3faca|SCCMSecrets.py|"
+    [CVE-2026-54121]="https://github.com/aniqfakhrul/CVE-2026-54121.git|34d3067c40d4e81e21d4c1f0f749936a109fb305|certighost.py|impacket,cryptography,asn1crypto,pycryptodomex,pyasn1"
+    [SCCMSecrets]="https://github.com/synacktiv/SCCMSecrets.git|5488158d097a7f76b879e0e5db7d9e123380fd7a|SCCMSecrets.py|"
     [cmloot]="https://github.com/shelltrail/cmloot.git|cfe1ae884e7ea224a44da8e9432fb8852e625e23|cmloot.py|"
 )
 
@@ -1309,6 +1316,12 @@ raise SystemExit(0 if installed & legacy else 1)
 PY
 }
 
+bloodhound_venv_ready() {
+    local python_bin="${1}/bin/python"
+    [ -x "$python_bin" ] || return 1
+    "$python_bin" -c 'import requests, colorama, yaml' &>/dev/null
+}
+
 add_to_file_if_absent() {
     local line="$1" file="$2"
     if [ -f "$file" ] && grep -qF "$line" "$file"; then
@@ -1339,32 +1352,59 @@ first_nonempty_env() {
 }
 
 build_proxy_env_args() {
+    local name
     PROXY_ENV_ARGS=()
-    if [ -n "${http_proxy:-}" ]; then
-        PROXY_ENV_ARGS+=("http_proxy=$http_proxy" "HTTP_PROXY=$http_proxy")
-    fi
-    if [ -n "${https_proxy:-}" ]; then
-        PROXY_ENV_ARGS+=("https_proxy=$https_proxy" "HTTPS_PROXY=$https_proxy")
-    fi
+    for name in http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+        [ -z "${!name:-}" ] || PROXY_ENV_ARGS+=("$name=${!name}")
+    done
 }
 
 export_proxy_settings() {
-    if [ -n "${http_proxy:-}" ]; then
-        export http_proxy
-        export HTTP_PROXY="$http_proxy"
-    else
-        unset http_proxy HTTP_PROXY || true
-    fi
-
-    if [ -n "${https_proxy:-}" ]; then
-        export https_proxy
-        export HTTPS_PROXY="$https_proxy"
-    else
-        unset https_proxy HTTPS_PROXY || true
-    fi
-
+    local scheme name upper value
+    for scheme in http https all no; do
+        name="${scheme}_proxy"
+        upper="${name^^}"
+        value="${PROXY_SETTINGS[$scheme]:-}"
+        if [ -n "$value" ]; then
+            export "$name=$value" "$upper=$value"
+        else
+            unset "$name" "$upper"
+        fi
+    done
     build_proxy_env_args
 }
+
+apply_proxy_scope() {
+    unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+    PROXY_ENV_ARGS=()
+    if [ "$PROXY_SCOPE" = all ]; then
+        export_proxy_settings
+    fi
+}
+
+initialize_proxy_settings() {
+    [ "$PROXY_INITIALIZED" = false ] || return 0
+    local scheme name
+    for scheme in http https all no; do
+        name="${scheme}_proxy"
+        PROXY_SETTINGS[$scheme]=$(first_nonempty_env "$name" "${name^^}")
+    done
+    PROXY_INITIALIZED=true
+    apply_proxy_scope
+}
+
+# Только дочерний процесс получает proxy: соседние параллельные установки
+# и следующие этапы продолжают работать с выбранной общей областью действия.
+with_bloodhound_proxy() (
+    initialize_proxy_settings
+    export_proxy_settings
+    # Python requests обращается к локальному API BloodHound. Пользовательские
+    # исключения сохраняются; localhost должен работать и при внешнем proxy.
+    export no_proxy="${no_proxy:+${no_proxy},}localhost,127.0.0.1,::1,app-db,graph-db,bloodhound"
+    export NO_PROXY="$no_proxy"
+    build_proxy_env_args
+    "$@"
+)
 
 sudo_with_proxy() {
     sudo "${PROXY_ENV_ARGS[@]}" "$@"
@@ -1420,7 +1460,7 @@ for line in proxy_lines:
 
 anchors = (
     '      - POSTGRES_DATABASE=${POSTGRES_DATABASE:-bloodhound}\n',
-    '      - NEO4J_PLUGINS=["graph-data-science"]\n',
+    '      - NEO4J_dbms_allow__upgrade=true\n',
     '      - bhe_disable_cypher_qc=${bhe_disable_cypher_qc:-false}\n',
 )
 proxy_block = ''.join(proxy_lines)
@@ -1489,14 +1529,6 @@ replacements = (
         '        self.no_gds = no_gds\n        self.templates_directory = Path(__file__).resolve().parent.parent / "templates"\n',
     ),
     (
-        '        with open("./templates/docker-compose.yml", "r") as ifile:\n',
-        '        with open(self.templates_directory / "docker-compose.yml", "r") as ifile:\n',
-    ),
-    (
-        '        with open("./templates/bloodhound.config.json", "r") as ifile:\n',
-        '        with open(self.templates_directory / "bloodhound.config.json", "r") as ifile:\n',
-    ),
-    (
         'import pickle\n',
         'import pickle\nimport tempfile\n',
     ),
@@ -1523,10 +1555,255 @@ def replace_section(source: str, start_marker: str, end_marker: str, replacement
     return source[:start] + replacement + source[end:]
 
 
+for module in ("hashlib", "yaml"):
+    line = f"import {module}\n"
+    if line not in text:
+        text = text.replace("import tempfile\n", "import tempfile\n" + line, 1)
+ports_import = "from src.ports import reserve_project_ports, atomic_write, valid_port, compose_ports\n"
+text = ''.join(line for line in text.splitlines(keepends=True) if not line.startswith("from src.ports import "))
+text = text.replace("import src.utils as utils\n", "import src.utils as utils\n" + ports_import, 1)
+if "from src.ports import project_lock\n" not in cli_text:
+    cli_text = cli_text.replace("from src.project import Project\n", "from src.project import Project\nfrom src.ports import project_lock\n", 1)
+
+ports_source = r'''"""Persistent host port reservations for BloodHound projects."""
+from contextlib import ExitStack, contextmanager
+import errno
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import tempfile
+
+import yaml
+
+
+DEFAULT_PORTS = {"bolt": 7687, "neo4j": 7474, "web": 8080}
+
+
+def atomic_write(path, content, mode=None):
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("wb" if isinstance(content, bytes) else "w",
+                                         dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary = Path(output.name)
+            output.write(content)
+        # Bind-mounted configuration must remain readable inside containers,
+        # including images running as a different, unprivileged UID.
+        os.chmod(temporary, mode if mode is not None else (path.stat().st_mode if path.exists() else 0o644))
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def project_lock(root, name):
+    """Serialize starts of one project without blocking other projects."""
+    if not name or name in (".", "..") or Path(name).name != name:
+        raise ValueError("Project name must be a directory name, without a path")
+    root = Path(root)
+    if (root / name).is_symlink():
+        raise ValueError("Project directory must not be a symbolic link")
+    root.mkdir(parents=True, exist_ok=True)
+    lock_name = ".start-" + hashlib.sha256(name.encode()).hexdigest() + ".lock"
+    with (root / lock_name).open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError(f"Project {name} is already being started; wait for that command to finish") from exc
+        yield
+
+
+def valid_port(value):
+    if isinstance(value, bool) or not str(value).isdigit() or not 1 <= int(value) <= 65535:
+        raise ValueError(f"Invalid TCP port: {value!r}; expected 1..65535")
+    return int(value)
+
+
+def published_ports(value):
+    # Compose also accepts host port ranges; reserve the entire range.
+    value = str(value)
+    if value in ("", "0"):
+        return set()
+    bounds = value.split("-")
+    if len(bounds) == 1:
+        return {valid_port(value)}
+    if len(bounds) != 2:
+        raise ValueError(f"Invalid published port range: {value!r}")
+    first, last = map(valid_port, bounds)
+    if first > last:
+        raise ValueError(f"Invalid published port range: {value!r}")
+    return set(range(first, last + 1))
+
+
+def compose_ports(config):
+    if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
+        raise ValueError("Compose configuration has no services")
+    reserved = set()
+    for service in config["services"].values():
+        for mapping in service.get("ports", []):
+            if isinstance(mapping, dict):
+                if mapping.get("protocol", "tcp") == "tcp" and mapping.get("published") is not None:
+                    reserved.update(published_ports(mapping["published"]))
+            else:
+                address, _, protocol = str(mapping).partition("/")
+                if protocol not in ("", "tcp") or ":" not in address:
+                    continue
+                # The last two components are host:container, including IPv6.
+                host = address.rsplit(":", 1)[0].rsplit(":", 1)[-1]
+                reserved.update(published_ports(host))
+    return reserved
+
+
+def command_output(arguments, cwd=None):
+    try:
+        result = subprocess.run(arguments, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Could not inspect port reservations using {' '.join(arguments[:3])}") from exc
+    return result.stdout
+
+
+def project_ports(root, compose_command):
+    reserved = set()
+    for directory in sorted(root.iterdir()):
+        if not directory.is_dir():
+            continue
+        record = directory / "ports.json"
+        compose = directory / "docker-compose.yml"
+        try:
+            if record.exists():
+                ports = json.loads(record.read_text())
+                if not isinstance(ports, dict) or set(ports) != set(DEFAULT_PORTS):
+                    raise ValueError("Invalid ports.json")
+                reserved.update(valid_port(port) for port in ports.values())
+            if compose.exists():
+                # Resolve legacy ${BLOODHOUND_PORT}, .env and Compose overrides.
+                resolved = command_output([*compose_command, "config"], cwd=directory)
+                reserved.update(compose_ports(yaml.safe_load(resolved)))
+            elif (directory / "project.pkl").exists() and not record.exists():
+                raise ValueError("Missing docker-compose.yml and ports.json")
+        except (OSError, ValueError, yaml.YAMLError, TypeError, AttributeError) as exc:
+            raise ValueError(f"Cannot determine reserved ports for project {directory.name}: {exc}") from exc
+    return reserved
+
+
+def docker_ports():
+    # Inspect HostConfig as well as sockets: stopped containers and Docker NAT
+    # mappings without docker-proxy do not necessarily appear in `ss`.
+    identifiers = command_output(["docker", "ps", "-aq"]).split()
+    reserved = set()
+    for offset in range(0, len(identifiers), 100):
+        containers = json.loads(command_output(["docker", "inspect", *identifiers[offset:offset + 100]]))
+        for container in containers:
+            bindings = container.get("HostConfig", {}).get("PortBindings") or {}
+            for container_port, addresses in bindings.items():
+                if container_port.endswith("/tcp"):
+                    for address in addresses or []:
+                        reserved.update(published_ports(address.get("HostPort", "")))
+            # Include actual host ports chosen dynamically by Docker.
+            for container_port, addresses in (container.get("NetworkSettings", {}).get("Ports") or {}).items():
+                if container_port.endswith("/tcp"):
+                    for address in addresses or []:
+                        reserved.update(published_ports(address.get("HostPort", "")))
+    return reserved
+
+
+def port_available(port):
+    families = [(socket.AF_INET, "0.0.0.0")]
+    if socket.has_ipv6:
+        families.append((socket.AF_INET6, "::"))
+    with ExitStack() as sockets:
+        for family, address in families:
+            try:
+                connection = sockets.enter_context(socket.socket(family, socket.SOCK_STREAM))
+                if family == socket.AF_INET6:
+                    connection.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                connection.bind((address, port))
+            except OSError as exc:
+                if family == socket.AF_INET6 and exc.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+                    continue
+                if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+                    return False
+                raise
+    return True
+
+
+def reserve_project_ports(root, name, requested, compose_command):
+    # Use a single, unambiguous Compose name and keep all files under projects/.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+        raise ValueError("New project names must start with a lowercase letter or digit and contain only lowercase letters, digits, '-' or '_'")
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / ".ports.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        directory = root / name
+        if os.path.lexists(directory):
+            raise ValueError(f"Project {name} already exists; its configuration was preserved")
+        reserved = project_ports(root, compose_command) | docker_ports()
+        selected = {}
+        # Explicit choices take priority over every automatically chosen port.
+        for role in DEFAULT_PORTS:
+            if requested.get(role) is not None:
+                port = valid_port(requested[role])
+                if port in reserved or not port_available(port):
+                    raise ValueError(f"{role} port {port} is already in use or reserved; choose another port")
+                selected[role] = port
+                reserved.add(port)
+        for role, default in DEFAULT_PORTS.items():
+            if role in selected:
+                continue
+            for port in range(default, 65536):
+                if port not in reserved and port_available(port):
+                    selected[role] = port
+                    reserved.add(port)
+                    break
+            else:
+                raise ValueError(f"No available TCP port for {role}")
+        directory.mkdir()
+        # Persist before releasing the lock or contacting Docker. A failed
+        # initialization still reserves its ports without a completed pickle.
+        atomic_write(directory / "ports.json", json.dumps(selected, indent=2) + "\n")
+        return selected
+'''
+
+docker_setup = r'''    def dockerSetup(self) -> None:
+        """Render host port mappings without changing container ports."""
+        compose = (self.templates_directory / "docker-compose.yml").read_text()
+        replacements = {
+            "      - 7687:7687": f'      - "{self.ports["bolt"]}:7687"',
+            "      - 7474:7474": f'      - "{self.ports["neo4j"]}:7474"',
+            "      - ${BLOODHOUND_PORT:-8080}:8080": f'      - "{self.ports["web"]}:8080"',
+        }
+        lines = compose.splitlines()
+        for old, new in replacements.items():
+            if lines.count(old) != 1:
+                raise ValueError(f"Unexpected port mapping in Docker template: {old.strip()}")
+            lines[lines.index(old)] = new
+        if self.no_gds:
+            lines = [line for line in lines if line.strip() != '- NEO4J_PLUGINS=["graph-data-science"]']
+
+        config = json.loads((self.templates_directory / "bloodhound.config.json").read_text())
+        config["root_url"] = f"http://127.0.0.1:{self.ports['web']}/"
+        project_directory = self.source_directory / self.name
+        atomic_write(project_directory / "bloodhound.config.json", json.dumps(config, indent=2) + "\n")
+        atomic_write(project_directory / "docker-compose.yml", "\n".join(lines) + "\n")
+
+
+'''
+setup_end = next(marker for marker in ("    def replaceLog", "    def readDockerLogs", "    def getAdminPassword") if marker in text)
+text = replace_section(text, "    def dockerSetup", setup_end, docker_setup)
+
+
 # The upstream command treats every `start` as a fresh installation. Replace
 # complete lifecycle methods after normalizing the pinned upstream revision so
 # an already prepared checkout is upgraded idempotently as well.
-admin_password_functions = '''    def replaceLog(self, content: str) -> None:
+admin_password_functions = r'''    def replaceLog(self, content: str) -> None:
         """Publish a complete logs.txt without reusing an old open inode."""
         log_path = self.source_directory / self.name / "logs.txt"
         with tempfile.NamedTemporaryFile(
@@ -1550,12 +1827,13 @@ admin_password_functions = '''    def replaceLog(self, content: str) -> None:
         `docker compose logs --follow` process behind.
         """
         result = subprocess.run(
-            [*utils.command, "logs", "--no-color"],
+            [*self.composeCommand(), "logs", "--no-color"],
             cwd=self.source_directory / self.name,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=30,
         )
         log = result.stdout or ""
         self.replaceLog(log)
@@ -1570,37 +1848,34 @@ admin_password_functions = '''    def replaceLog(self, content: str) -> None:
 
     def getAdminPassword(self) -> str:
         """Find the one-time password during initial installation."""
-        start_time = time.time()
+        start_time = time.monotonic()
         while True:
             try:
                 log = self.readDockerLogs()
             except (OSError, subprocess.CalledProcessError) as exc:
                 print(Fore.RED + f"[-] Could not read Docker Compose logs: {exc}" + Style.RESET_ALL)
                 exit(1)
-            match = re.search(r"Initial Password Set To:\\s*([^#\\r\\n]+)", log)
+            match = re.search(r"Initial Password Set To:\s*([^#\r\n]+)", log)
             if match:
                 return match.group(1).strip()
-            if time.time() - start_time >= self.timeout:
-                print(Fore.RED + "[-] Timeout: check logs.txt for more information" + Style.RESET_ALL)
-                exit(1)
+            if time.monotonic() - start_time >= self.timeout:
+                raise TimeoutError("Could not find the initial admin password; check logs.txt")
             time.sleep(1)
 
 
     def waitForWebServer(self) -> None:
-        """Wait for the initial BloodHound startup to finish."""
-        start_time = time.time()
+        """Check the live server, including when old startup logs remain."""
+        start_time = time.monotonic()
         while True:
             try:
-                log = self.readDockerLogs()
-            except (OSError, subprocess.CalledProcessError) as exc:
-                print(Fore.RED + f"[-] Could not read Docker Compose logs: {exc}" + Style.RESET_ALL)
-                exit(1)
-            if "Server started successfully" in log:
-                print(Fore.GREEN + "[+] Web server launched successfully" + Style.RESET_ALL)
-                return
-            if time.time() - start_time >= self.timeout:
-                print(Fore.RED + "[-] Timeout while waiting for the web server; check logs.txt" + Style.RESET_ALL)
-                exit(1)
+                response = requests.get(self.base_url, timeout=min(5, self.timeout))
+                if response.status_code == 200:
+                    print(Fore.GREEN + "[+] Web server launched successfully" + Style.RESET_ALL)
+                    return
+            except requests.RequestException:
+                pass
+            if time.monotonic() - start_time >= self.timeout:
+                raise TimeoutError("Timeout while waiting for the web server; check logs.txt")
             time.sleep(1)
 
 
@@ -1619,7 +1894,107 @@ text = replace_section(
     admin_password_functions,
 )
 
-start_methods = '''    def composeUpArguments(self) -> List[str]:
+api_methods = r'''    def refreshJWT(self, adminPassword: str, quiet: bool = False) -> bool:
+        """
+        Get the JWT token required for actions
+        """
+        url = self.base_url + "/api/v2/login"
+        data_to_send = {
+            "login_method": "secret",
+            "secret": adminPassword,
+            "username": "admin"
+        }
+        response = requests.post(url, json=data_to_send, timeout=30)
+        if response.status_code == 200:
+            response_json = response.json()
+            self.jwt = response_json["data"]["session_token"]
+            return True
+        if quiet and response.status_code in (401, 403):
+            return False
+        response.raise_for_status()
+        raise RuntimeError(f"Unexpected login response: {response.status_code}")
+
+
+    def getUserID(self) -> None:
+        """
+        Get the user ID of the admin account
+        """
+        headers = {
+                    "User-Agent": "bh-automation",
+                    "Authorization": f"Bearer {self.jwt}"
+                }
+
+        request0 = requests.get(self.base_url + f"/api/v2/self", headers=headers, timeout=30)
+        request0.raise_for_status()
+        self.user_ID = request0.json()["data"]["id"]
+
+        print(Fore.GREEN + f"[+] UserID found : {self.user_ID}" + Style.RESET_ALL)
+        return
+
+
+    def resetPassword(self, adminPassword: str) -> None:
+        """
+        Reset the admin's password
+        """
+        headers = {
+                    "User-Agent": "bh-automation",
+                    "Authorization": f"Bearer {self.jwt}",
+                    "Content-Type": "application/json",
+                }
+
+        passwData = {
+            "current_secret": adminPassword,
+            "needs_password_reset": False,
+            "secret": self.password
+        }
+
+        request0 = requests.put(self.base_url + f"/api/v2/bloodhound-users/{self.user_ID}/secret", headers=headers, data=json.dumps(passwData), timeout=30)
+        request0.raise_for_status()
+        
+        print(Fore.GREEN + f"[+] Changed admin password to : {self.password}" + Style.RESET_ALL)
+        return
+
+    def getApiVersion(self) -> None:
+        """
+        Print the current BHCE server version in green.
+        """
+        headers = {
+            "User-Agent": "bh-automation",
+            "Authorization": f"Bearer {self.jwt}",
+            "Content-Type": "application/json",
+        }
+
+        response = requests.get(self.base_url + "/api/version", headers=headers, timeout=30)
+
+        if response.status_code == 200:
+            json_data = response.json().get("data", {})
+            self.bhce_version = json_data.get("server_version", "unknown")
+
+            print(Fore.GREEN + f"[+] You are using BHCE {self.bhce_version}" + Style.RESET_ALL)
+        else:
+            print(Fore.RED + f"[-] Failed to get BHCE version: {response.status_code}" + Style.RESET_ALL)
+        return
+
+
+    def save(self) -> None:
+        """
+        Save the project object in a pickle dump
+        """
+        atomic_write(self.source_directory / self.name / "project.pkl", pickle.dumps(self), mode=0o600)
+        return
+
+
+'''
+api_end_marker = next(marker for marker in ("    def composeCommand", "    def composeUpArguments", "    def start(self)") if marker in text)
+text = replace_section(text, "    def refreshJWT", api_end_marker, api_methods)
+
+start_methods = r'''    def composeCommand(self) -> List[str]:
+        """Keep new projects isolated even when COMPOSE_PROJECT_NAME is set."""
+        name = getattr(self, "compose_project_name", None)
+        return [*utils.command, "-p", name] if name else list(utils.command)
+
+
+    def composeUpArguments(self) -> List[str]:
         """Build an offline Compose up command for the available CLI."""
         arguments = ["up", "-d"]
         if utils.command == ["docker", "compose"]:
@@ -1631,7 +2006,7 @@ start_methods = '''    def composeUpArguments(self) -> List[str]:
         """Return Compose v2 images that are absent from the local daemon."""
         project_directory = self.source_directory / self.name
         config = subprocess.run(
-            [*utils.command, "config", "--images"],
+            [*self.composeCommand(), "config", "--images"],
             cwd=project_directory,
             text=True,
             stdout=subprocess.PIPE,
@@ -1688,7 +2063,7 @@ start_methods = '''    def composeUpArguments(self) -> List[str]:
                     with open(log_path, "r", errors="replace") as current_log:
                         shutil.copyfileobj(current_log, output_log)
                 result = subprocess.run(
-                    [*utils.command, *arguments],
+                    [*self.composeCommand(), *arguments],
                     cwd=self.source_directory / self.name,
                     text=True,
                     stdout=output_log,
@@ -1704,6 +2079,143 @@ start_methods = '''    def composeUpArguments(self) -> List[str]:
             raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
+    def composeOutput(self, arguments: List[str]) -> str:
+        result = subprocess.run(
+            [*self.composeCommand(), *arguments], cwd=self.source_directory / self.name,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30,
+        )
+        return result.stdout
+
+
+    def waitForDatabases(self) -> None:
+        """Allow a running database to recover from unhealthy within -t."""
+        deadline = time.monotonic() + self.timeout
+        print(Fore.YELLOW + f"[*] Waiting for databases (timeout: {self.timeout}s)..." + Style.RESET_ALL)
+        while True:
+            identifiers = self.composeOutput(["ps", "-a", "-q", "app-db", "graph-db"]).split()
+            if len(identifiers) != 2:
+                raise RuntimeError("Could not find both database containers; check logs.txt")
+            result = subprocess.run(
+                ["docker", "inspect", *identifiers], text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=True, timeout=30,
+            )
+            states = {}
+            for container in json.loads(result.stdout):
+                service = container["Config"]["Labels"]["com.docker.compose.service"]
+                state = container["State"]
+                if state["Status"] in ("exited", "dead", "removing", "paused"):
+                    raise RuntimeError(f"{service} is {state['Status']} (exit code {state.get('ExitCode')}); check logs.txt")
+                health = (state.get("Health") or {}).get("Status")
+                if health is None:
+                    raise RuntimeError(f"{service} has no healthcheck; cannot confirm database readiness")
+                states[service] = health if state["Status"] == "running" else state["Status"]
+            if states == {"app-db": "healthy", "graph-db": "healthy"}:
+                return
+            if time.monotonic() >= deadline:
+                details = ", ".join(f"{name}={status}" for name, status in sorted(states.items()))
+                raise TimeoutError(f"Databases did not become ready within {self.timeout}s ({details}); retry start with a larger -t")
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+
+
+    def startServices(self, log_mode: str = "a", preserve_containers: bool = True) -> None:
+        # Compose aborts dependency startup as soon as a healthcheck becomes
+        # unhealthy. Wait ourselves: GDS may still be downloading at that point.
+        arguments = [*self.composeUpArguments(), "--no-deps"]
+        if preserve_containers:
+            arguments.append("--no-recreate")
+        self.runCompose([*arguments, "app-db", "graph-db"], log_mode)
+        self.waitForDatabases()
+        self.runCompose([*arguments, "bloodhound"], "a")
+
+
+    def initializationConfigHashes(self) -> dict:
+        directory = self.source_directory / self.name
+        return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                for name in ("docker-compose.yml", "bloodhound.config.json")}
+
+
+    def restoreIncomplete(self) -> None:
+        """Resume only recognizable, consistent files; never regenerate them."""
+        directory = self.source_directory / self.name
+        for name in ("ports.json", "docker-compose.yml", "bloodhound.config.json"):
+            path = directory / name
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(f"Cannot safely resume: missing or unsupported {name}; project files were preserved")
+        ports = json.loads((directory / "ports.json").read_text())
+        if not isinstance(ports, dict) or set(ports) != {"bolt", "neo4j", "web"}:
+            raise ValueError("Cannot safely resume: invalid ports.json")
+        ports = {role: valid_port(port) for role, port in ports.items()}
+        if len(set(ports.values())) != 3:
+            raise ValueError("Cannot safely resume: duplicate ports in ports.json")
+        for role, requested in self.ports.items():
+            if requested is not None and requested != ports[role]:
+                raise ValueError(f"Project {self.name} already uses {role} port {ports[role]}; resume preserves existing ports")
+        self.compose_project_name = self.name
+        resolved = yaml.safe_load(self.composeOutput(["config"]))
+        services = resolved.get("services", {})
+        if not all(isinstance(services.get(name), dict) for name in ("app-db", "graph-db", "bloodhound")):
+            raise ValueError("Cannot safely resume: expected BloodHound services are missing")
+        for service, expected in (("graph-db", {ports["bolt"], ports["neo4j"]}), ("bloodhound", {ports["web"]})):
+            if compose_ports({"services": {service: services[service]}}) != expected:
+                raise ValueError(f"Cannot safely resume: {service} ports do not match ports.json")
+        environment = services["graph-db"].get("environment") or {}
+        if isinstance(environment, list):
+            environment = dict(item.split("=", 1) for item in environment if "=" in item)
+        plugins = json.loads(environment.get("NEO4J_PLUGINS") or "[]")
+        no_gds = "graph-data-science" not in plugins
+        if self.no_gds and not no_gds:
+            raise ValueError("Resume preserves the GDS setting; omit --no-gds for this project")
+        state_path = directory / "initialization.json"
+        if state_path.exists():
+            if state_path.is_symlink():
+                raise ValueError("Cannot safely resume: initialization.json must not be a symbolic link")
+            state = json.loads(state_path.read_text())
+            if (not isinstance(state, dict) or state.get("version") != 1
+                    or state.get("ports") != ports or state.get("no_gds") != no_gds
+                    or state.get("config_hashes") != self.initializationConfigHashes()
+                    or not isinstance(state.get("password"), str)):
+                raise ValueError("Cannot safely resume: initialization settings or project configuration changed")
+            if self.password is not None and self.password != state["password"]:
+                raise ValueError("Resume preserves the saved password; omit --password or provide the original value")
+            self.password = state["password"]
+        self.ports = ports
+        self.no_gds = no_gds
+
+
+    def recordInitialization(self) -> None:
+        state = {"version": 1, "ports": self.ports, "password": self.password,
+                 "no_gds": self.no_gds, "config_hashes": self.initializationConfigHashes()}
+        atomic_write(self.source_directory / self.name / "initialization.json",
+                     json.dumps(state, indent=2) + "\n", mode=0o600)
+
+
+    def initializeWeb(self) -> None:
+        self.waitForWebServer()
+        # A previous attempt may have changed the password just before it was
+        # interrupted. Authenticate with that password before trying the old one.
+        if self.refreshJWT(self.password, quiet=True):
+            self.getUserID()
+        else:
+            admin_password = self.getAdminPassword()
+            if not self.refreshJWT(admin_password, quiet=True):
+                raise RuntimeError("Could not authenticate with the saved or initial password; project data was preserved")
+            self.getUserID()
+            self.resetPassword(admin_password)
+        self.getApiVersion()
+
+
+    def reportStartupFailure(self, exc: Exception) -> None:
+        path = self.source_directory / self.name / "logs.txt"
+        try:
+            previous = path.read_text(errors="replace") if path.is_file() else ""
+            logs = self.readDockerLogs()
+            self.replaceLog(previous + "\n" + logs)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        print(Fore.RED + f"[-] Could not start project {self.name}: {exc}" + Style.RESET_ALL)
+        print(f"Check {path}. Retry start with the same project name; saved ports and data are preserved.")
+
+
     def startExisting(self) -> None:
         """Start an initialized project using local images only."""
         project_directory = self.source_directory / self.name
@@ -1713,36 +2225,38 @@ start_methods = '''    def composeUpArguments(self) -> List[str]:
 
         print(Fore.YELLOW + f"[*] Starting existing project {self.name} without pulling images..." + Style.RESET_ALL)
         try:
-            self.runCompose(self.composeUpArguments(), "w")
-        except (OSError, subprocess.CalledProcessError) as exc:
-            print(Fore.RED + f"An error occurred while starting Docker Compose: {exc}")
-            print(Style.RESET_ALL + "Exiting...")
+            self.startServices("w", preserve_containers=False)
+            self.waitForWebServer()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, requests.RequestException) as exc:
+            self.reportStartupFailure(exc)
             exit(1)
 
         print(Fore.GREEN + f"[+] Project {self.name} started" + Style.RESET_ALL)
         print(Fore.GREEN + f"[+] BloodHound Web GUI: {self.base_url}" + Style.RESET_ALL)
 
 
-    def start(self) -> None:
-        """Create and initialize a new project."""
-        if not self.isValidPassword():
-            print(Fore.RED + f"[-] The chosen password '{self.password}' does not respect the complexity criteria" + Style.RESET_ALL)
-            print("Your password must be at least 12 characters long and contain lowercase, uppercase, digit and special characters")
-            print("Exiting...")
+    def start(self, resume: bool = False) -> None:
+        """Create a project or finish an interrupted initialization."""
+        try:
+            if self.timeout <= 0:
+                raise ValueError("Timeout must be greater than zero")
+            if resume:
+                self.restoreIncomplete()
+            self.password = self.password if self.password is not None else "Chien2Sang<3"
+            if not self.isValidPassword():
+                raise ValueError("Password must contain at least 12 characters, uppercase, lowercase, a digit and a special character")
+            if not resume:
+                self.ports = reserve_project_ports(self.source_directory, self.name, self.ports, utils.command)
+                self.compose_project_name = self.name
+                self.dockerSetup()
+            self.base_url = f"http://localhost:{self.ports['web']}"
+            self.recordInitialization()
+        except (OSError, ValueError, AttributeError, TypeError, yaml.YAMLError, subprocess.SubprocessError) as exc:
+            print(Fore.RED + f"[-] Could not prepare project {self.name}: {exc}" + Style.RESET_ALL)
             exit(1)
 
-        if not utils.createDir(Path(__file__).parent, self.source_directory):
-            print(Fore.RED + f'[-] The folder "{self.source_directory}" could not be created.')
-            print(Style.RESET_ALL + "Exiting...")
-            exit(1)
-
-        if not self.createProject():
-            print(Fore.RED + f'[-] The project folder "{self.name}" could not be created.')
-            print(Style.RESET_ALL + "Exiting...")
-            exit(1)
-
-        self.dockerSetup()
-        print(Fore.GREEN + "[+] Docker setup done" + Style.RESET_ALL)
+        print(Fore.GREEN + f"[+] Ports: bolt={self.ports['bolt']}, neo4j={self.ports['neo4j']}, web={self.ports['web']}" + Style.RESET_ALL)
+        print(Fore.GREEN + ("[+] Resuming saved project configuration" if resume else "[+] Docker setup done") + Style.RESET_ALL)
         print(Fore.YELLOW + "[*] Launching BloodHound..." + Style.RESET_ALL)
         print(f"The docker logs are accessible in {self.source_directory / self.name / 'logs.txt'}")
 
@@ -1777,36 +2291,25 @@ start_methods = '''    def composeUpArguments(self) -> List[str]:
                     + Style.RESET_ALL
                 )
                 up_log_mode = "w"
-            self.runCompose(self.composeUpArguments(), up_log_mode)
-        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
-            print(Fore.RED + f"An error occurred while starting Docker Compose: {exc}")
-            print(Style.RESET_ALL + "Exiting...")
+            self.startServices(up_log_mode)
+            self.initializeWeb()
+            self.save()
+            (self.source_directory / self.name / "initialization.json").unlink(missing_ok=True)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, requests.RequestException) as exc:
+            self.reportStartupFailure(exc)
             exit(1)
-
-        # Get the default admin password
-        adminPassword = self.getAdminPassword()
-        print(Fore.GREEN + f"[+] Found admin temporary password: {adminPassword}" + Style.RESET_ALL)
-
-        # Wait for the web server to be ready
-        self.waitForWebServer()
-
-        # Get the JWT token of the admin
-        self.refreshJWT(adminPassword)
-        print(Fore.GREEN + f"[+] Found JWT token: {self.jwt}" + Style.RESET_ALL)
-        self.getUserID()
-        self.resetPassword(adminPassword)
-        self.getApiVersion()
 
         print(Fore.GREEN + f"[+] Project {self.name} initialized successfully" + Style.RESET_ALL)
         print(Fore.GREEN + f"[+] BloodHound Web GUI: {self.base_url}" + Style.RESET_ALL)
         print(Fore.GREEN + f"[+] Username: admin; password: {self.password}" + Style.RESET_ALL)
-        self.save()
         return
 
 
 '''
 lifecycle_start_marker = (
-    "    def composeUpArguments"
+    "    def composeCommand"
+    if "    def composeCommand" in text
+    else "    def composeUpArguments"
     if "    def composeUpArguments" in text
     else "    def start(self)"
 )
@@ -1853,38 +2356,64 @@ delete_start = text.find("    def delete(self)")
 if delete_start == -1:
     raise SystemExit("bloodhound-automation patch failed: delete method not found")
 text = text[:delete_start] + delete_method
+text = text.replace("[*utils.command,", "[*self.composeCommand(),")
+# The command builder itself must reference the underlying CLI, not recurse.
+text = text.replace('return [*self.composeCommand(), "-p", name]', 'return [*utils.command, "-p", name]')
 
-cli_start = '''    elif args.subparser == "start":
+for role, flag, default in (("bolt", "bp", 7687), ("neo4j", "np", 7474), ("web", "wp", 8080)):
+    prefix = f"    parser_start.add_argument('-{flag}', '--{role}-port',"
+    lines = cli_text.splitlines(keepends=True)
+    matching = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    if len(matching) != 1:
+        raise SystemExit(f"bloodhound-automation patch failed: missing {role} port argument")
+    lines[matching[0]] = prefix + f' type=int, default=None, help="Host TCP port (default: first available from {default})")\n'
+    cli_text = ''.join(lines)
+
+for prefix, replacement in (
+    ("    parser_start.add_argument('-p', '--password',", '    parser_start.add_argument(\'-p\', \'--password\', type=str, default=None, help="New project password (default: Chien2Sang<3); resume preserves the saved password")\n'),
+    ("    parser_start.add_argument('-t', '--timeout',", '    parser_start.add_argument(\'-t\', \'--timeout\', type=int, default=1200, help="Seconds to wait for database and web startup, including GDS download (default: 1200)")\n'),
+):
+    lines = cli_text.splitlines(keepends=True)
+    matching = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    if len(matching) != 1:
+        raise SystemExit(f"bloodhound-automation patch failed: missing argument {prefix.strip()}")
+    lines[matching[0]] = replacement
+    cli_text = ''.join(lines)
+
+cli_start = r'''    elif args.subparser == "start":
+        if args.timeout <= 0:
+            parser.error("--timeout must be greater than zero")
         project_directory = PROJECT_DIR / args.project
         project_file = project_directory / "project.pkl"
 
-        if os.path.lexists(project_directory):
-            if not project_directory.is_dir() or not project_file.is_file():
-                print(Fore.RED + f"[-] The project {args.project} exists only partially.")
-                print(Style.RESET_ALL + "Exiting...")
-                exit(1)
-            try:
-                with open(project_file, "rb") as pkl_file:
-                    project = pickle.load(pkl_file)
-            except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as exc:
-                print(Fore.RED + f"[-] Could not load project {args.project}: {exc}")
-                print(Style.RESET_ALL + "Exiting...")
-                exit(1)
+        try:
+            with project_lock(PROJECT_DIR, args.project):
+                if os.path.lexists(project_directory) and not project_directory.is_dir():
+                    raise ValueError(f"Project path is not a directory: {project_directory}")
+                if os.path.lexists(project_file):
+                    with open(project_file, "rb") as pkl_file:
+                        project = pickle.load(pkl_file)
 
-            # Preserve saved ports, password and GDS settings while allowing an
-            # old pickle to follow a moved checkout.
-            project.name = args.project
-            project.source_directory = PROJECT_DIR
-            project.base_url = f"http://localhost:{project.ports['web']}"
-            project.startExisting()
-        else:
-            project = Project(name = args.project,
-                              source_directory = PROJECT_DIR,
-                              ports = {"neo4j": args.neo4j_port, "bolt": args.bolt_port, "web": args.web_port},
-                              password = args.password,
-                              timeout = args.timeout,
-                              no_gds = args.no_gds)
-            project.start()
+                    # Preserve initialized project settings, including legacy
+                    # Compose identity, while honoring this invocation's timeout.
+                    project.name = args.project
+                    project.source_directory = PROJECT_DIR
+                    project.base_url = f"http://localhost:{project.ports['web']}"
+                    project.timeout = args.timeout
+                    for role in ("bolt", "neo4j", "web"):
+                        requested = getattr(args, role + "_port")
+                        if requested is not None and requested != project.ports[role]:
+                            parser.error(f"Project {args.project} already uses {role} port {project.ports[role]}; start preserves existing ports")
+                    project.startExisting()
+                else:
+                    project = Project(name=args.project,
+                                      source_directory=PROJECT_DIR,
+                                      ports={"neo4j": args.neo4j_port, "bolt": args.bolt_port, "web": args.web_port},
+                                      password=args.password, timeout=args.timeout, no_gds=args.no_gds)
+                    project.start(resume=project_directory.exists())
+        except (OSError, ValueError, pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as exc:
+            print(Fore.RED + f"[-] Could not start project {args.project}: {exc}" + Style.RESET_ALL)
+            exit(1)
 
 
 '''
@@ -1896,9 +2425,12 @@ cli_text = replace_section(
 )
 
 requirements_original = requirements_path.read_text()
-# The project invokes the system Docker Compose CLI. Its Python runtime only
-# imports requests and colorama; legacy Ansible/Compose packages are unnecessary.
-requirements_text = "requests==2.32.5\ncolorama\n"
+# PyYAML safely reads resolved Compose mappings, including legacy projects.
+# The system Compose CLI replaces the legacy Python Ansible/Compose packages.
+requirements_text = "requests==2.32.5\ncolorama\nPyYAML==6.0.3\n"
+ports_path = path.parent / "ports.py"
+for filename, content in ((path, text), (cli_path, cli_text), (ports_path, ports_source)):
+    compile(content, str(filename), "exec")
 
 
 def replace_file(file_path: Path, content: str) -> None:
@@ -1911,13 +2443,15 @@ def replace_file(file_path: Path, content: str) -> None:
         tmp.write(content)
         tmp_path = Path(tmp.name)
     try:
-        os.chmod(tmp_path, file_path.stat().st_mode)
+        os.chmod(tmp_path, file_path.stat().st_mode if file_path.exists() else 0o644)
         os.replace(tmp_path, file_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
 
 
+if not ports_path.exists() or ports_path.read_text() != ports_source:
+    replace_file(ports_path, ports_source)
 if text != original:
     replace_file(path, text)
 if cli_text != cli_original:
@@ -1926,7 +2460,7 @@ if requirements_text != requirements_original:
     replace_file(requirements_path, requirements_text)
 PY
 
-    success "bloodhound-automation: первичная установка и автономный повторный запуск разделены"
+    success "bloodhound-automation: новые проекты получают отдельные порты, повторный запуск сохраняет настройки"
 
     patch_bloodhound_automation_compose_file "${dir}/templates/docker-compose.yml"
 
@@ -2488,15 +3022,7 @@ tmux_validate_config() {
 # т.к. имя пакета и бинарника могут не совпадать в обе стороны:
 #   certipy-ad → бинарник certipy, impacket → бинарники secretsdump.py и т.д.
 is_uv_tool_installed() {
-    local name="$1"
-    cmd_exists uv || return 1
-    local uv_list
-    uv_list=$(uv tool list 2>/dev/null) || return 1
-    local ename
-    ename=$(regex_escape "$name")
-    echo "$uv_list" | grep -qi "^- ${ename}$" && return 0
-    echo "$uv_list" | grep -qi "^${ename} " && return 0
-    return 1
+    uv_tool_list_entry "$1" >/dev/null
 }
 
 # Определяет источник установки uv-инструмента: uv, pipx, system, ""
@@ -2529,62 +3055,112 @@ uv_tool_source() {
     fi
 }
 
-uv_tool_installed_version() {
-    local name="$1"
+# Основной distribution и версия из uv tool list: package|version.
+# Имена CLI могут отличаться от distribution (manspider -> man-spider).
+uv_tool_list_entry() {
+    local name="$1" uv_list
     cmd_exists uv || return 1
-    uv tool list 2>/dev/null | awk -v wanted="$name" '
-        BEGIN { wanted=tolower(wanted) }
-        $1 != "-" {
+    uv_list=$(uv tool list 2>/dev/null) || return 1
+    awk -v wanted="$name" -v commands="${name},${KNOWN_BINARIES[$name]:-}" '
+        function normalize(value) {
+            value=tolower(value); gsub(/[-_.]+/, "-", value); return value
+        }
+        BEGIN { wanted=normalize(wanted); split(tolower(commands), binaries, ",") }
+        $1 != "-" && $2 ~ /^v[0-9]/ {
             package=tolower($1)
             version=$2
-            if (package == wanted && version != "") {
-                print version
+            if (normalize(package) == wanted) {
+                print package "|" version
+                found=1
                 exit
             }
             next
         }
-        tolower($2) == wanted && version != "" {
-            print version
-            exit
+        $1 == "-" && package != "" {
+            for (i in binaries) {
+                if (tolower($2) == binaries[i]) {
+                    print package "|" version
+                    found=1
+                    exit
+                }
+            }
         }
-    '
+        END { if (!found) exit 1 }
+    ' <<< "$uv_list"
 }
 
-# PEP 610 direct_url.json содержит точный commit_id для uv tool,
-# установленного из Git. Если метаданных нет, вызывающий код показывает
-# версию как неопределённую, а не подставляет значение из конфигурации.
-uv_tool_installed_commit() {
-    local name="$1"
+uv_tool_installed_version() {
+    local entry
+    entry=$(uv_tool_list_entry "$1") || return 1
+    printf '%s' "${entry#*|}"
+}
+
+# Только PEP 610 основного distribution и только ожидаемый репозиторий.
+# Возвращает commit|requested_tag. Метаданные зависимостей, форков и локальных
+# каталогов не являются ревизией настроенного upstream.
+uv_tool_git_metadata() {
+    local name="$1" entry repo_url
     local uv_root="${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}"
     [ -d "$uv_root" ] && cmd_exists python3 || return 1
+    entry=$(uv_tool_list_entry "$name") || return 1
+    repo_url=$(uv_tool_url "${UV_TOOLS[$name]}")
 
-    python3 - "$uv_root" "$name" "${KNOWN_BINARIES[$name]:-}" <<'PY'
+    python3 - "$uv_root" "${entry%%|*}" "$repo_url" <<'PY'
 from pathlib import Path
+from email.parser import Parser
 import json
+import re
 import sys
+from urllib.parse import urlsplit
+
+def normalize(value):
+    return re.sub(r"[-_.]+", "-", value).casefold()
+
+def repository(value):
+    if not isinstance(value, str):
+        return None
+    url = urlsplit(value.removeprefix("git+"))
+    if url.scheme not in {"https", "http", "ssh", "git"} or not url.hostname:
+        return None
+    path = url.path.rstrip("/").removesuffix(".git")
+    if url.hostname.casefold() == "github.com":
+        path = path.casefold()
+    return url.hostname.casefold(), path
 
 root = Path(sys.argv[1])
-name = sys.argv[2]
-executables = {name, *(item for item in sys.argv[3].split(",") if item)}
+package = normalize(sys.argv[2])
+expected_repo = repository(sys.argv[3])
 
 for env in sorted(root.iterdir()):
-    if not env.is_dir():
-        continue
-    belongs = env.name.casefold().replace("_", "-") == name.casefold().replace("_", "-")
-    belongs = belongs or any((env / "bin" / executable).exists() for executable in executables)
-    if not belongs:
+    if not env.is_dir() or normalize(env.name) != package:
         continue
     for receipt in env.glob("lib/python*/site-packages/*.dist-info/direct_url.json"):
         try:
+            metadata = Parser().parsestr((receipt.parent / "METADATA").read_text())
+            if normalize(metadata.get("Name", "")) != package:
+                continue
             data = json.loads(receipt.read_text())
-            commit = data.get("vcs_info", {}).get("commit_id", "")
+            if not isinstance(data, dict) or repository(data.get("url")) != expected_repo:
+                continue
+            vcs = data.get("vcs_info", {})
+            if not isinstance(vcs, dict) or vcs.get("vcs") != "git":
+                continue
+            commit = vcs.get("commit_id", "")
+            requested = vcs.get("requested_revision", "")
         except (OSError, ValueError, TypeError):
             continue
-        if len(commit) == 40 and all(char in "0123456789abcdef" for char in commit):
-            print(commit)
+        if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
+            tag = requested if isinstance(requested, str) and re.fullmatch(r"v?\d+\.\d+\.\d+", requested) else ""
+            print(f"{commit}|{tag}")
             raise SystemExit(0)
 raise SystemExit(1)
 PY
+}
+
+uv_tool_installed_commit() {
+    local metadata
+    metadata=$(uv_tool_git_metadata "$1") || return 1
+    printf '%s' "${metadata%%|*}"
 }
 
 local_git_head() {
@@ -2637,6 +3213,66 @@ go_tool_module() {
     printf '%s' "${spec%%/cmd/*}"
 }
 
+# Квитанция связывает версию скачанного release с содержимым файла. Она
+# записывается только при новой установке, а замена файла делает её невалидной.
+record_binary_version() {
+    local name="$1" binary="$2" version="$3" digest tmp
+    is_stable_version_tag "$version" || return 1
+    digest=$(sha256sum "$binary" | awk '{print $1}') || return 1
+    mkdir -p "${LOG_DIR}/binary-versions"
+    tmp=$(mktemp "${LOG_DIR}/binary-versions/.${name}.XXXXXX") || return 1
+    printf '%s|%s\n' "$version" "$digest" > "$tmp"
+    mv -- "$tmp" "${LOG_DIR}/binary-versions/${name}"
+}
+
+recorded_binary_version() {
+    local name="$1" binary="$2" version digest actual
+    [ -s "$binary" ] && [ -r "${LOG_DIR}/binary-versions/${name}" ] || return 1
+    IFS='|' read -r version digest < "${LOG_DIR}/binary-versions/${name}" || return 1
+    is_stable_version_tag "$version" && [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual=$(sha256sum "$binary" | awk '{print $1}') || return 1
+    [ "$actual" = "$digest" ] || return 1
+    printf '%s' "$version"
+}
+
+binary_tool_installed_version() {
+    local name="$1" binary output
+    local args=()
+    binary=$(command -v "$name" 2>/dev/null) || return 1
+    [ -f "$binary" ] && [ -x "$binary" ] || return 1
+    # Запрос версии не должен запускать sudo-обёртку.
+    if grep -Fqx "# Managed by prepare.sh: sudo wrapper for ${name}" "$binary"; then
+        binary="${binary}.orig"
+        [ -x "$binary" ] || return 1
+    fi
+    if recorded_binary_version "$name" "$binary"; then
+        return 0
+    fi
+    case "$name" in
+        pretender|flashingestor|rusthound-ce|legba|trufflehog) args=(--version) ;;
+        gowitness|kerbrute) args=(version) ;;
+        bettercap) args=(-version) ;;
+        *) return 1 ;;
+    esac
+    output=$(timeout 5s "$binary" "${args[@]}" </dev/null 2>&1) || return 1
+    # Не принимаем версию Go из build info, номер зависимости или часть
+    # prerelease за версию самого инструмента.
+    python3 - "$name" "$output" <<'PY'
+import re
+import sys
+name, output = sys.argv[1:]
+output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+prefix = rf"(?:(?:{re.escape(name)})(?:\s+version)?\s*:?\s*|version\s*:?\s*)?"
+pattern = re.compile(rf"^\s*{prefix}(v?[0-9]+\.[0-9]+\.[0-9]+)(?![\w.+-])", re.I)
+for line in output.splitlines():
+    match = pattern.match(line)
+    if match:
+        print(match[1])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 chisel_installed_version() {
     local binary="${TOOLS_DIR}/chisel/chisel"
     [ -x "$binary" ] && [ -s "$binary" ] || return 1
@@ -2657,6 +3293,95 @@ refs_equivalent() {
     else
         return 2
     fi
+}
+
+# Общий выбор локальной базы и канала remote для отчёта и --skip.
+# UPDATE_* объявляются local в вызывающей функции (динамическая область Bash).
+tool_update_context() {
+    local name="$1" source metadata commit requested dir url remainder
+    UPDATE_REPO="" UPDATE_BRANCH="" UPDATE_BASELINE="" UPDATE_CONFIGURED=""
+    UPDATE_LOCAL="" UPDATE_STATE="missing" UPDATE_CHANNEL="head"
+
+    if [[ -v "UV_TOOLS[$name]" ]]; then
+        UPDATE_REPO=$(uv_tool_url "${UV_TOOLS[$name]}")
+        UPDATE_CONFIGURED=$(uv_tool_ref "${UV_TOOLS[$name]}")
+        UPDATE_BRANCH=$(uv_tool_update_branch "${UV_TOOLS[$name]}")
+        is_commit_ref "$UPDATE_CONFIGURED" || UPDATE_CHANNEL="tag"
+        source=$(uv_tool_source "$name")
+        case "$source" in
+            uv)
+                UPDATE_STATE="present"
+                UPDATE_LOCAL=$(uv_tool_installed_version "$name" || true)
+                metadata=$(uv_tool_git_metadata "$name" || true)
+                commit="${metadata%%|*}"
+                requested="${metadata#*|}"
+                if is_full_commit "$commit"; then
+                    UPDATE_BASELINE="$commit"
+                    UPDATE_LOCAL="$commit"
+                    if [ "$UPDATE_CHANNEL" = tag ] && is_stable_version_tag "$requested"; then
+                        UPDATE_BASELINE="$requested"
+                        UPDATE_LOCAL="$requested"
+                    fi
+                fi
+                ;;
+            pipx|system) UPDATE_STATE="external" ;;
+        esac
+    elif [[ -v "GIT_REPOS[$name]" || -v "VENV_REPOS[$name]" ]]; then
+        if [[ -v "GIT_REPOS[$name]" ]]; then
+            IFS='|' read -r UPDATE_REPO UPDATE_CONFIGURED remainder <<< "${GIT_REPOS[$name]}"
+        else
+            IFS='|' read -r UPDATE_REPO UPDATE_CONFIGURED remainder <<< "${VENV_REPOS[$name]}"
+        fi
+        dir="${TOOLS_DIR}/${name}"
+        UPDATE_LOCAL=$(local_git_head "$dir" || true)
+        if is_full_commit "$UPDATE_LOCAL"; then
+            UPDATE_BASELINE="$UPDATE_LOCAL"
+            UPDATE_STATE="present"
+            if [[ -v "VENV_REPOS[$name]" ]] && ! venv_repo_complete "$name" "$dir"; then
+                UPDATE_STATE="incomplete"
+            fi
+        fi
+    elif [[ -v "BINARY_TOOLS[$name]" ]]; then
+        UPDATE_CHANNEL="tag"
+        UPDATE_REPO=$(github_repo_from_url "$(binary_tool_url "${BINARY_TOOLS[$name]}")")
+        UPDATE_CONFIGURED=$(binary_tool_version "${BINARY_TOOLS[$name]}")
+        UPDATE_LOCAL=$(binary_tool_installed_version "$name" || true)
+        UPDATE_BASELINE="$UPDATE_LOCAL"
+        if binary_tool_commands_present "$name"; then
+            UPDATE_STATE="present"
+        elif [ -n "$UPDATE_LOCAL" ]; then
+            UPDATE_STATE="incomplete"
+        fi
+    elif [[ -v "WIN_TOOLS[$name]" ]]; then
+        UPDATE_CHANNEL="tag"
+        url="${WIN_TOOLS[$name]}"
+        UPDATE_REPO=$(github_repo_from_url "$url")
+        UPDATE_CONFIGURED=$(printf '%s' "$url" | grep -oP '/download/\K[^/]+' || true)
+        if is_valid_windows_binary "${TOOLS_DIR}/for_windows/${name}"; then
+            UPDATE_STATE="present"
+            UPDATE_LOCAL=$(recorded_binary_version "$name" "${TOOLS_DIR}/for_windows/${name}" || true)
+            UPDATE_BASELINE="$UPDATE_LOCAL"
+        fi
+    elif [[ -v "TMUX_PLUGINS[$name]" ]]; then
+        UPDATE_REPO="${TMUX_PLUGINS[$name]}"
+        UPDATE_LOCAL=$(local_git_head "${TMUX_PLUGIN_DIR}/${name}" || true)
+        if is_full_commit "$UPDATE_LOCAL"; then
+            UPDATE_STATE="present"
+            UPDATE_BASELINE="$UPDATE_LOCAL"
+        fi
+    elif [ "$name" = chisel ]; then
+        UPDATE_CHANNEL="tag"
+        UPDATE_REPO="https://github.com/jpillora/chisel"
+        UPDATE_CONFIGURED="v${CHISEL_VERSION}"
+        UPDATE_LOCAL=$(chisel_installed_version || true)
+        if is_stable_version_tag "$UPDATE_LOCAL"; then
+            UPDATE_STATE="present"
+            UPDATE_BASELINE="$UPDATE_LOCAL"
+        fi
+    else
+        return 1
+    fi
+    [ -n "$UPDATE_REPO" ]
 }
 
 dpkg_package_installed() {
@@ -2815,68 +3540,73 @@ latest_stable_tag_from_refs() {
         | cut -f2
 }
 
-# Формат результата:
-#   up-to-date[;pin-commit:<40 hex>]
-#   different-head:<40 hex>
-#   new-tag:<tag>:<40 hex>[;pin-commit:<40 hex>]
-#   error
-#
+# Результат содержит remote-commit — одну и ту же ревизию для отчёта и --skip.
+# unknown означает, что remote получен, но установленная база неизвестна.
 # Для закреплённого коммита различие с HEAD не называется более новой
 # ревизией: ls-remote не содержит данных о направлении истории.
 # Для тегов учитываются только полные стабильные версии x.y.z.
 check_remote_updates() {
     local repo_url="$1" baseline_ref="$2" branch="${3:-}"
+    local channel="${4:-}" configured_ref="${5:-$2}"
     local target_ref="HEAD"
     [ -n "$branch" ] && target_ref="refs/heads/${branch}"
+    if [ -z "$channel" ]; then
+        if is_commit_ref "$baseline_ref"; then channel="head"; else channel="tag"; fi
+    fi
 
-    local all_refs head_commit
+    local all_refs head_commit pin_commit suffix=""
     if ! all_refs=$(git ls-remote "$repo_url" "$target_ref" 'refs/tags/*' 2>/dev/null); then
         echo "error"
         return 0
     fi
-    head_commit=$(awk -v ref="$target_ref" '$2 == ref { print $1; exit }' <<< "$all_refs")
-    if ! is_full_commit "$head_commit"; then
-        echo "error"
-        return 0
+    pin_commit=$(tag_commit_from_refs "$all_refs" "$configured_ref")
+    if is_full_commit "$pin_commit"; then
+        suffix=";pin-commit:${pin_commit}"
     fi
 
-    if is_commit_ref "$baseline_ref"; then
-        if hashes_match "$head_commit" "$baseline_ref"; then
-            echo "up-to-date"
-        else
-            echo "different-head:${head_commit}"
-        fi
-        return 0
-    fi
-
-    local pin_commit
-    pin_commit=$(tag_commit_from_refs "$all_refs" "$baseline_ref")
-    if ! is_full_commit "$pin_commit"; then
-        echo "error"
-        return 0
-    fi
-
-    if is_stable_version_tag "$baseline_ref"; then
-        local latest_tag latest_commit
-        latest_tag=$(latest_stable_tag_from_refs "$all_refs")
-        if [ -z "$latest_tag" ]; then
+    if [ "$channel" = head ]; then
+        head_commit=$(awk -v ref="$target_ref" '$2 == ref { print $1; exit }' <<< "$all_refs")
+        if ! is_full_commit "$head_commit"; then
             echo "error"
             return 0
         fi
-        if version_tag_is_newer "$latest_tag" "$baseline_ref"; then
-            latest_commit=$(tag_commit_from_refs "$all_refs" "$latest_tag")
-            if ! is_full_commit "$latest_commit"; then
-                echo "error"
-                return 0
-            fi
-            echo "new-tag:${latest_tag}:${latest_commit};pin-commit:${pin_commit}"
+        suffix+=";remote-commit:${head_commit}"
+        if ! is_commit_ref "$baseline_ref"; then
+            echo "unknown;remote-head:${head_commit}${suffix}"
+        elif hashes_match "$head_commit" "$baseline_ref"; then
+            echo "up-to-date${suffix}"
         else
-            echo "up-to-date;pin-commit:${pin_commit}"
+            echo "different-head:${head_commit}${suffix}"
         fi
+        return 0
+    fi
+
+    local latest_tag latest_commit
+    latest_tag=$(latest_stable_tag_from_refs "$all_refs")
+    if [ -z "$latest_tag" ]; then
+        echo "no-stable-tags${suffix}"
+        return 0
+    fi
+    latest_commit=$(tag_commit_from_refs "$all_refs" "$latest_tag")
+    if ! is_full_commit "$latest_commit"; then
+        echo "error"
+        return 0
+    fi
+    suffix+=";remote-commit:${latest_commit}"
+
+    # Числовое сравнение не требует существования тега установленной версии.
+    if is_stable_version_tag "$baseline_ref"; then
+        if version_tag_is_newer "$latest_tag" "$baseline_ref"; then
+            echo "new-tag:${latest_tag}:${latest_commit}${suffix}"
+        elif version_tag_is_newer "$baseline_ref" "$latest_tag"; then
+            echo "local-newer;remote-tag:${latest_tag}:${latest_commit}${suffix}"
+        else
+            echo "up-to-date${suffix}"
+        fi
+    elif is_commit_ref "$baseline_ref" && hashes_match "$baseline_ref" "$latest_commit"; then
+        echo "up-to-date${suffix}"
     else
-        # Неверсионный тег можно проверить на наличие, но нельзя корректно
-        # ранжировать вместе с произвольными именами тегов.
-        echo "up-to-date;pin-commit:${pin_commit}"
+        echo "unknown;remote-tag:${latest_tag}:${latest_commit}${suffix}"
     fi
 }
 
@@ -2918,63 +3648,72 @@ go_tool_remote_state() {
 # Неинтерактивный режим (--auto): применяет действия по умолчанию без вопросов
 AUTO_MODE=false
 
-# Настройка HTTP/HTTPS proxy
+# Настройки хранятся отдельно от окружения, пока не выбрана их область действия.
 configure_proxy() {
-    local current_http current_https http_answer https_answer
+    local context="${1:-install}"
+    local current_http current_https selected_http selected_https http_answer https_answer
 
-    current_http=$(first_nonempty_env http_proxy HTTP_PROXY)
-    current_https=$(first_nonempty_env https_proxy HTTPS_PROXY)
-
-    http_proxy="$current_http"
-    https_proxy="$current_https"
-
-    if [ "$AUTO_MODE" = true ]; then
-        if [ -z "${https_proxy:-}" ] && [ -n "${http_proxy:-}" ]; then
-            https_proxy="$http_proxy"
-        fi
-        export_proxy_settings
-        if [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
-            info "Автоматический режим: используются HTTP/HTTPS proxy из окружения"
-        else
-            info "Автоматический режим: HTTP/HTTPS proxy не заданы"
-        fi
+    initialize_proxy_settings
+    # В режиме по умолчанию проверка обновлений и работа со skip-списком
+    # выполняются напрямую и не задают неиспользуемых вопросов о proxy.
+    if [ "$PROXY_SCOPE" != all ] && [ "$context" != install ]; then
         return 0
     fi
 
-    warn "При необходимости настройте HTTP/HTTPS proxy для сетевых операций и контейнеров BloodHound"
-    echo ""
+    current_http="${PROXY_SETTINGS[http]}"
+    current_https="${PROXY_SETTINGS[https]}"
+    selected_http="$current_http"
+    selected_https="$current_https"
 
-    if [ -n "$current_http" ]; then
-        prompt_read http_answer "HTTP proxy [${current_http}] (Enter — оставить, '-' — убрать): "
+    if [ "$AUTO_MODE" = true ]; then
+        if [ -z "$selected_https" ]; then
+            selected_https="$selected_http"
+        fi
     else
-        prompt_read http_answer "HTTP proxy (например http://127.0.0.1:8080, Enter — без proxy): "
+        if [ "$PROXY_SCOPE" = all ]; then
+            info "Proxy будет использоваться для всех сетевых операций (--proxy-all)"
+        else
+            info "Proxy будет использоваться только для bloodhound-automation"
+        fi
+
+        if [ -n "$current_http" ]; then
+            prompt_read http_answer "HTTP proxy [${current_http}] (Enter — оставить, '-' — убрать): "
+        else
+            prompt_read http_answer "HTTP proxy (например http://127.0.0.1:8080, Enter — без proxy): "
+        fi
+        case "$http_answer" in
+            "") ;;
+            "-") selected_http="" ;;
+            *) selected_http="$http_answer" ;;
+        esac
+
+        if [ -n "$current_https" ]; then
+            prompt_read https_answer "HTTPS proxy [${current_https}] (Enter — оставить, '=' — как HTTP, '-' — убрать): "
+        else
+            prompt_read https_answer "HTTPS proxy (Enter — как HTTP proxy, '-' — без proxy): "
+        fi
+        case "$https_answer" in
+            "")
+                if [ -z "$current_https" ]; then
+                    selected_https="$selected_http"
+                fi
+                ;;
+            "=") selected_https="$selected_http" ;;
+            "-") selected_https="" ;;
+            *) selected_https="$https_answer" ;;
+        esac
     fi
-    case "$http_answer" in
-        "") ;;
-        "-") http_proxy="" ;;
-        *) http_proxy="$http_answer" ;;
-    esac
 
-    if [ -n "$current_https" ]; then
-        prompt_read https_answer "HTTPS proxy [${current_https}] (Enter — оставить, '=' — как HTTP, '-' — убрать): "
-    else
-        prompt_read https_answer "HTTPS proxy (Enter — как HTTP proxy, '-' — без proxy): "
-    fi
-    case "$https_answer" in
-        "")
-            if [ -z "$current_https" ]; then
-                https_proxy="$http_proxy"
-            fi
-            ;;
-        "=") https_proxy="$http_proxy" ;;
-        "-") https_proxy="" ;;
-        *) https_proxy="$https_answer" ;;
-    esac
+    PROXY_SETTINGS[http]="$selected_http"
+    PROXY_SETTINGS[https]="$selected_https"
+    apply_proxy_scope
 
-    export_proxy_settings
-
-    if [ -n "${http_proxy:-}" ] || [ -n "${https_proxy:-}" ]; then
-        success "Proxy-настройки применены"
+    if [ -n "$selected_http" ] || [ -n "$selected_https" ] || [ -n "${PROXY_SETTINGS[all]}" ]; then
+        if [ "$PROXY_SCOPE" = all ]; then
+            success "Proxy: все сетевые операции (--proxy-all)"
+        else
+            success "Proxy: только bloodhound-automation"
+        fi
     else
         info "Proxy не задан"
     fi
@@ -3422,117 +4161,119 @@ cmd_status() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  --check-updates: проверка новых версий относительно версий в скрипте
-#                   (через git ls-remote, без зависимости от локальных репо)
+#  --check-updates: проверка remote относительно установленной версии/ревизии
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Отображает локальное состояние отдельно от результата remote-проверки.
+# Краткий результат проверки; * отмечает сравнение с версией из скрипта.
 # Аргументы: name local_state local_ref configured_ref result
 # local_state: present | external | incomplete | missing
 CHECK_UPDATE_ERRORS=0
 
+print_update_line() {
+    local color="$1" symbol="$2" details="$3" status="$4"
+    # Один цвет от символа до конца строки, включая имя инструмента.
+    # %s сохраняет текст как есть; только цветовые константы трактуются как ANSI.
+    printf '  %b%s %s %s%b\n' "$color" "$symbol" "$details" "$status" "$NC"
+}
+
 display_update_result() {
-    local name="$1" local_state="$2" local_ref="$3" configured_ref="$4" result="$5"
-    local configured_commit=""
-    configured_commit=$(result_field "$result" "pin-commit" 2>/dev/null || true)
-
-    local icon local_text match="unknown"
-    case "$local_state" in
-        missing)
-            icon="${RED}✗${NC}"
-            local_text="локально: не установлен"
-            ;;
-        incomplete)
-            icon="${RED}✗${NC}"
-            local_text="локально: неполная установка"
-            [ -n "$local_ref" ] && local_text+=" (${local_ref:0:12})"
-            ;;
-        external)
-            icon="${YELLOW}~${NC}"
-            local_text="локально: внешний источник, версия не определена"
-            ;;
-        present)
-            if [ -n "$local_ref" ]; then
-                local_text="локально: ${local_ref:0:40}"
-                if [ -z "$configured_ref" ]; then
-                    match="yes"
-                elif refs_equivalent "$local_ref" "$configured_ref" "$configured_commit"; then
-                    match="yes"
-                else
-                    case $? in
-                        1) match="no" ;;
-                        *) match="unknown" ;;
-                    esac
-                fi
-            else
-                local_text="локально: установлен, версия не определена"
-            fi
-            case "$match" in
-                yes) icon="${GREEN}✓${NC}" ;;
-                no)  icon="${YELLOW}!${NC}" ;;
-                *)   icon="${YELLOW}?${NC}" ;;
-            esac
-            ;;
-        *)
-            icon="${YELLOW}?${NC}"
-            local_text="локальное состояние не определено"
-            ;;
-    esac
-
-    local details="${name} (${local_text}"
-    [ -z "$configured_ref" ] || details+="; для новой установки: ${configured_ref}"
-    details+=")"
-    local line="  ${icon} ${details}"
+    local name="$1" local_ref="$3" configured_ref="$4" result="$5"
+    local baseline="$local_ref" marker="" details="$name"
+    if result_has "$result" unknown; then
+        baseline="$configured_ref"
+        [ -z "$baseline" ] || marker="*"
+    fi
+    if is_commit_ref "$baseline"; then
+        baseline="${baseline:0:12}"
+    fi
+    [ -z "$baseline" ] || details+=" (${baseline}${marker})"
 
     if [ "$result" = "error" ] || [ -z "$result" ]; then
         CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-        echo -e "  ${YELLOW}?${NC} ${details} ${YELLOW}(remote: не удалось проверить)${NC}"
+        print_update_line "$RED" '?' "$name" '— ошибка проверки'
         return 0
     fi
     if [ "$result" = "not-checked" ]; then
-        echo -e "${line} ${DIM}(remote не проверяется без локальной копии)${NC}"
+        print_update_line "$GRAY" '−' "$name" '— проверка пропущена'
         return 0
     fi
 
     local tag_payload="" tag="" tag_commit="" remote_head="" event_commit=""
+    local new_tag=false different_head=false
     tag_payload=$(result_field "$result" "new-tag" 2>/dev/null || true)
+    if [ -n "$tag_payload" ]; then
+        new_tag=true
+    else
+        tag_payload=$(result_field "$result" "remote-tag" 2>/dev/null || true)
+    fi
     remote_head=$(result_field "$result" "different-head" 2>/dev/null || true)
+    if [ -n "$remote_head" ]; then
+        different_head=true
+    else
+        remote_head=$(result_field "$result" "remote-head" 2>/dev/null || true)
+    fi
     if [ -n "$tag_payload" ]; then
         tag="${tag_payload%%:*}"
         tag_commit="${tag_payload##*:}"
         is_full_commit "$tag_commit" || {
             CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-            echo -e "  ${YELLOW}?${NC} ${details} ${YELLOW}(remote: неверный ответ)${NC}"
+            print_update_line "$RED" '?' "$name" '— неверный ответ remote'
             return 0
         }
         event_commit="$tag_commit"
     elif [ -n "$remote_head" ]; then
         is_full_commit "$remote_head" || {
             CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-            echo -e "  ${YELLOW}?${NC} ${details} ${YELLOW}(remote: неверный ответ)${NC}"
+            print_update_line "$RED" '?' "$name" '— неверный ответ remote'
             return 0
         }
         event_commit="$remote_head"
     fi
 
     if [ -n "$event_commit" ] && is_skipped "$name" "$event_commit"; then
-        echo -e "${line} ${GRAY}(remote-ревизия скрыта: ${event_commit:0:12})${NC}"
+        print_update_line "$GRAY" '−' "$name" "— скрыто: ${tag:-${event_commit:0:12}}"
+    elif [ "$new_tag" = true ]; then
+        print_update_line "$CYAN" '↑' "$details" "→ ${tag}"
+    elif [ "$different_head" = true ]; then
+        print_update_line "$YELLOW" '↔' "$details" "↔ ${remote_head:0:12}"
+    elif result_has "$result" "local-newer"; then
+        print_update_line "$GREEN" '✓' "$details" '— без обновлений'
     elif [ -n "$tag" ]; then
-        echo -e "  ${CYAN}↑${NC} ${details} ${CYAN}→ стабильный тег remote: ${tag} (${tag_commit:0:12})${NC}"
+        # Для закрепления используется та же цветовая схема; база отмечена *.
+        if is_stable_version_tag "$configured_ref"; then
+            if version_tag_is_newer "$tag" "$configured_ref"; then
+                print_update_line "$CYAN" '↑' "$details" "→ ${tag}"
+            else
+                print_update_line "$GREEN" '✓' "$details" '— без обновлений'
+            fi
+        else
+            print_update_line "$YELLOW" '?' "$name" "— remote: ${tag}; нет базы сравнения"
+        fi
     elif [ -n "$remote_head" ]; then
-        echo -e "  ${YELLOW}↔${NC} ${details} ${YELLOW}remote HEAD отличается: ${remote_head:0:12}; направление истории не определено${NC}"
+        if hashes_match "$remote_head" "$configured_ref"; then
+            print_update_line "$GREEN" '✓' "$details" '— без обновлений'
+        elif is_commit_ref "$configured_ref"; then
+            print_update_line "$YELLOW" '↔' "$details" "↔ ${remote_head:0:12}"
+        else
+            print_update_line "$YELLOW" '?' "$name" "— HEAD: ${remote_head:0:12}; нет базы сравнения"
+        fi
+    elif result_has "$result" "no-stable-tags"; then
+        print_update_line "$YELLOW" '?' "$name" '— нет стабильных тегов'
     elif result_has "$result" "up-to-date"; then
-        echo -e "${line} ${GREEN}(remote: отличий от базы проверки нет)${NC}"
+        print_update_line "$GREEN" '✓' "$details" '— без обновлений'
     else
         CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-        echo -e "  ${YELLOW}?${NC} ${details} ${YELLOW}(remote: неверный ответ)${NC}"
+        print_update_line "$RED" '?' "$name" '— неверный ответ remote'
     fi
 }
 
 cmd_check_updates() {
-    header "Проверка обновлений (remote)"
+    header "Проверка обновлений"
+    printf '  %b✓ актуально%b  %b↑ новая версия%b  %b↔/? различия/неизвестно%b  %b− пропуск%b  %b? ошибка%b\n' \
+        "$GREEN" "$NC" "$CYAN" "$NC" "$YELLOW" "$NC" "$GRAY" "$NC" "$RED" "$NC"
+    info "* — версия из скрипта; ↔ — коммиты различаются, порядок неизвестен."
     configure_install_jobs || return 1
-    configure_proxy
+    configure_proxy check-updates
     acquire_state_lock || return 1
     gist_pull
     CHECK_UPDATE_ERRORS=0
@@ -3545,162 +4286,24 @@ cmd_check_updates() {
     CHECK_UPDATE_JOB_PIDS=()
     info "Запрос remote (до ${INSTALL_JOBS} одновременно)..."
 
-    local -A _uv_state=() _uv_local=()
-    local -A _git_state=() _git_local=()
-    local -A _venv_state=() _venv_local=()
-    local -A _bin_state=()
-    local -A _win_state=()
-    local -A _tmux_state=() _tmux_local=()
-    local _chisel_state="missing" _chisel_local=""
+    local -A _check_state=() _check_local=() _check_configured=()
+    local UPDATE_REPO UPDATE_BRANCH UPDATE_BASELINE UPDATE_CHANNEL
+    local UPDATE_CONFIGURED UPDATE_LOCAL UPDATE_STATE name
 
-    # uv tools
-    for name in "${!UV_TOOLS[@]}"; do
-        local ref repo_url update_branch src installed_commit installed_version baseline
-        ref=$(uv_tool_ref "${UV_TOOLS[$name]}")
-        repo_url=$(uv_tool_url "${UV_TOOLS[$name]}")
-        update_branch=$(uv_tool_update_branch "${UV_TOOLS[$name]}")
-        src=$(uv_tool_source "$name")
-        installed_commit=""
-        installed_version=""
-        case "$src" in
-            uv)
-                _uv_state["$name"]="present"
-                installed_commit=$(uv_tool_installed_commit "$name" 2>/dev/null || true)
-                installed_version=$(uv_tool_installed_version "$name" 2>/dev/null || true)
-                if is_commit_ref "$ref"; then
-                    _uv_local["$name"]="${installed_commit:-$installed_version}"
-                else
-                    _uv_local["$name"]="${installed_version:-$installed_commit}"
-                fi
-                ;;
-            pipx|system)
-                _uv_state["$name"]="external"
-                _uv_local["$name"]=""
-                ;;
-            *)
-                _uv_state["$name"]="missing"
-                _uv_local["$name"]=""
-                ;;
-        esac
-        if is_stable_version_tag "$installed_version"; then
-            baseline="$installed_version"
-        elif is_full_commit "$installed_commit"; then
-            baseline="$installed_commit"
+    for name in "${!UV_TOOLS[@]}" "${!GIT_REPOS[@]}" "${!VENV_REPOS[@]}" \
+        "${!BINARY_TOOLS[@]}" chisel "${!WIN_TOOLS[@]}" "${!TMUX_PLUGINS[@]}"; do
+        if ! tool_update_context "$name"; then
+            printf 'error\n' > "${_chk_dir}/tool_${name}"
+        elif [[ -v "TMUX_PLUGINS[$name]" ]] && [ "$UPDATE_STATE" = missing ]; then
+            printf 'not-checked\n' > "${_chk_dir}/tool_${name}"
         else
-            baseline="$ref"
-        fi
-        ( check_remote_updates "$repo_url" "$baseline" "$update_branch" > "${_chk_dir}/uv_${name}" ) &
-        track_check_update_job "$!"
-    done
-
-    # Git-репозитории
-    for name in "${!GIT_REPOS[@]}"; do
-        local url commit dir local_head
-        url=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f1)
-        commit=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f2)
-        dir="${TOOLS_DIR}/${name}"
-        local_head=$(local_git_head "$dir" || true)
-        if is_full_commit "$local_head"; then
-            _git_state["$name"]="present"
-            _git_local["$name"]="$local_head"
-            baseline="$local_head"
-        else
-            _git_state["$name"]="missing"
-            _git_local["$name"]=""
-            baseline="$commit"
-        fi
-        ( check_remote_updates "$url" "$baseline" > "${_chk_dir}/git_${name}" ) &
-        track_check_update_job "$!"
-    done
-
-    # Venv-репозитории
-    for name in "${!VENV_REPOS[@]}"; do
-        local url commit dir local_head
-        url=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f1)
-        commit=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f2)
-        dir="${TOOLS_DIR}/${name}"
-        local_head=$(local_git_head "$dir" || true)
-        if is_full_commit "$local_head"; then
-            _venv_local["$name"]="$local_head"
-            baseline="$local_head"
-            if venv_repo_complete "$name" "$dir"; then
-                _venv_state["$name"]="present"
-            else
-                _venv_state["$name"]="incomplete"
-            fi
-        else
-            _venv_state["$name"]="missing"
-            _venv_local["$name"]=""
-            baseline="$commit"
-        fi
-        ( check_remote_updates "$url" "$baseline" > "${_chk_dir}/venv_${name}" ) &
-        track_check_update_job "$!"
-    done
-
-    # Бинарные утилиты
-    for name in "${!BINARY_TOOLS[@]}"; do
-        local pinned repo_url
-        pinned=$(binary_tool_version "${BINARY_TOOLS[$name]}")
-        repo_url=$(github_repo_from_url "$(binary_tool_url "${BINARY_TOOLS[$name]}")")
-        if binary_tool_commands_present "$name"; then
-            _bin_state["$name"]="present"
-        else
-            _bin_state["$name"]="missing"
-        fi
-        if [ -n "$repo_url" ]; then
-            ( check_remote_updates "$repo_url" "$pinned" > "${_chk_dir}/bin_${name}" ) &
+            ( check_remote_updates "$UPDATE_REPO" "$UPDATE_BASELINE" "$UPDATE_BRANCH" \
+                "$UPDATE_CHANNEL" "$UPDATE_CONFIGURED" > "${_chk_dir}/tool_${name}" ) &
             track_check_update_job "$!"
-        else
-            printf 'error\n' > "${_chk_dir}/bin_${name}"
         fi
-    done
-
-    # Chisel
-    _chisel_local=$(chisel_installed_version || true)
-    if [ -n "$_chisel_local" ]; then
-        _chisel_state="present"
-        baseline="$_chisel_local"
-    else
-        baseline="v${CHISEL_VERSION}"
-    fi
-    ( check_remote_updates "https://github.com/jpillora/chisel" "$baseline" \
-        > "${_chk_dir}/chisel" ) &
-    track_check_update_job "$!"
-
-    # Windows-утилиты
-    for name in "${!WIN_TOOLS[@]}"; do
-        local url repo_url pinned
-        url="${WIN_TOOLS[$name]}"
-        repo_url=$(github_repo_from_url "$url")
-        pinned=$(echo "$url" | grep -oP '/download/\K[^/]+' || true)
-        if is_valid_windows_binary "${TOOLS_DIR}/for_windows/${name}"; then
-            _win_state["$name"]="present"
-        else
-            _win_state["$name"]="missing"
-        fi
-        if [ -n "$repo_url" ]; then
-            ( check_remote_updates "$repo_url" "$pinned" > "${_chk_dir}/win_${name}" ) &
-            track_check_update_job "$!"
-        else
-            printf 'error\n' > "${_chk_dir}/win_${name}"
-        fi
-    done
-
-    # tmux plugins: сравнение ведётся с реально установленным commit.
-    for name in "${!TMUX_PLUGINS[@]}"; do
-        local local_head
-        local_head=$(local_git_head "${TMUX_PLUGIN_DIR}/${name}" || true)
-        if is_full_commit "$local_head"; then
-            _tmux_state["$name"]="present"
-            _tmux_local["$name"]="$local_head"
-            ( check_remote_updates "${TMUX_PLUGINS[$name]}" "$local_head" \
-                > "${_chk_dir}/tmux_${name}" ) &
-            track_check_update_job "$!"
-        else
-            _tmux_state["$name"]="missing"
-            _tmux_local["$name"]=""
-            printf 'not-checked\n' > "${_chk_dir}/tmux_${name}"
-        fi
+        _check_state["$name"]="$UPDATE_STATE"
+        _check_local["$name"]="$UPDATE_LOCAL"
+        _check_configured["$name"]="$UPDATE_CONFIGURED"
     done
 
     # Go
@@ -3744,126 +4347,63 @@ cmd_check_updates() {
     # ── Фаза 2: отображение результатов ──────────────────────────────────────
     local _result
 
-    # ── uv tools
-    echo ""
-    info "uv tools"
-    for name in "${!UV_TOOLS[@]}"; do
-        local configured
-        configured=$(uv_tool_display_version "${UV_TOOLS[$name]}")
-        _result=$(cat "${_chk_dir}/uv_${name}" 2>/dev/null) || _result="error"
-        [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_uv_state[$name]}" \
-            "${_uv_local[$name]}" "$configured" "$_result"
-    done
-
-    # ── Git-репозитории
-    echo ""
-    info "Git-репозитории"
-    for name in "${!GIT_REPOS[@]}"; do
-        local expected_commit
-        expected_commit=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f2)
-        _result=$(cat "${_chk_dir}/git_${name}" 2>/dev/null) || _result="error"
-        [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_git_state[$name]}" \
-            "${_git_local[$name]}" "$expected_commit" "$_result"
-    done
-
-    # ── Venv-репозитории
-    echo ""
-    info "Venv-репозитории"
-    for name in "${!VENV_REPOS[@]}"; do
-        local expected_commit
-        expected_commit=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f2)
-        _result=$(cat "${_chk_dir}/venv_${name}" 2>/dev/null) || _result="error"
-        [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_venv_state[$name]}" \
-            "${_venv_local[$name]}" "$expected_commit" "$_result"
-    done
-
-    # ── Бинарные утилиты
-    echo ""
-    info "Бинарные утилиты"
-    for name in "${!BINARY_TOOLS[@]}"; do
-        local pinned repo_url
-        pinned=$(binary_tool_version "${BINARY_TOOLS[$name]}")
-        repo_url=$(github_repo_from_url "$(binary_tool_url "${BINARY_TOOLS[$name]}")")
-        _result=$(cat "${_chk_dir}/bin_${name}" 2>/dev/null) || _result="error"
-        [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_bin_state[$name]}" "" "$pinned" "$_result"
-    done
-
-    # ── Chisel
-    echo ""
-    info "Chisel"
-    _result=$(cat "${_chk_dir}/chisel" 2>/dev/null) || _result="error"
-    [ -n "$_result" ] || _result="error"
-    display_update_result "chisel" "$_chisel_state" "$_chisel_local" \
-        "v${CHISEL_VERSION}" "$_result"
-
-    # ── Windows-утилиты
-    echo ""
-    info "Windows-утилиты"
-    for name in "${!WIN_TOOLS[@]}"; do
-        local url repo_url pinned
-        url="${WIN_TOOLS[$name]}"
-        pinned=$(echo "$url" | grep -oP '/download/\K[^/]+' || true)
-        _result=$(cat "${_chk_dir}/win_${name}" 2>/dev/null) || _result="error"
-        [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_win_state[$name]}" "" "$pinned" "$_result"
+    local group label
+    local group_names=()
+    for group in uv git venv binary chisel windows; do
+        case "$group" in
+            uv) label="uv tools"; group_names=("${!UV_TOOLS[@]}") ;;
+            git) label="Git-репозитории"; group_names=("${!GIT_REPOS[@]}") ;;
+            venv) label="Venv-репозитории"; group_names=("${!VENV_REPOS[@]}") ;;
+            binary) label="Бинарные утилиты"; group_names=("${!BINARY_TOOLS[@]}") ;;
+            chisel) label="Chisel"; group_names=(chisel) ;;
+            windows) label="Windows-утилиты"; group_names=("${!WIN_TOOLS[@]}") ;;
+        esac
+        echo ""
+        info "$label"
+        for name in "${group_names[@]}"; do
+            _result=$(cat "${_chk_dir}/tool_${name}" 2>/dev/null) || _result="error"
+            display_update_result "$name" "${_check_state[$name]}" \
+                "${_check_local[$name]}" "${_check_configured[$name]}" "$_result"
+        done
     done
 
     # ── Go
     echo ""
     info "Go"
-    local latest_go current_go="" go_icon
+    local latest_go current_go=""
     latest_go=$(cat "${_chk_dir}/go_latest" 2>/dev/null)
     if cmd_exists go && go version &>/dev/null; then
         current_go=$(go version | grep -oP 'go\K[0-9.]+' | head -1 || true)
     fi
-    if [ -z "$current_go" ]; then
-        go_icon="${RED}✗${NC}"
-    elif [ "$current_go" = "$GO_VERSION" ]; then
-        go_icon="${GREEN}✓${NC}"
-    else
-        go_icon="${YELLOW}!${NC}"
-    fi
-    local go_details="go (локально: ${current_go:-не установлен}; для новой установки: ${GO_VERSION})"
-    local go_line="  ${go_icon} ${go_details}"
+    local go_details="go (${current_go:-${GO_VERSION}*})"
     if [ "$latest_go" = "error" ] || [ -z "$latest_go" ]; then
         CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-        echo -e "  ${YELLOW}?${NC} ${go_details} ${YELLOW}(remote: не удалось проверить)${NC}"
+        print_update_line "$RED" '?' go '— ошибка проверки'
     elif [ -z "$current_go" ]; then
-        echo -e "${go_line} ${DIM}(стабильная версия remote: ${latest_go})${NC}"
+        if version_tag_is_newer "$latest_go" "$GO_VERSION"; then
+            print_update_line "$CYAN" '↑' "$go_details" "→ ${latest_go}"
+        else
+            print_update_line "$GREEN" '✓' "$go_details" '— без обновлений'
+        fi
     elif [ "$latest_go" = "$current_go" ]; then
-        echo -e "${go_line} ${GREEN}(remote совпадает с локальной версией)${NC}"
+        print_update_line "$GREEN" '✓' "$go_details" '— без обновлений'
     elif version_tag_is_newer "v${latest_go}" "v${current_go}"; then
-        echo -e "${go_line} ${CYAN}→ стабильная версия remote: ${latest_go}${NC}"
+        print_update_line "$CYAN" '↑' "$go_details" "→ ${latest_go}"
+    elif version_tag_is_newer "v${current_go}" "v${latest_go}"; then
+        print_update_line "$GREEN" '✓' "$go_details" '— без обновлений'
     else
-        echo -e "${go_line} ${YELLOW}(стабильная версия remote отличается: ${latest_go})${NC}"
+        print_update_line "$YELLOW" '?' "$go_details" "— remote: ${latest_go}; сравнение недоступно"
     fi
 
     # ── Go-утилиты
     echo ""
     info "Go-утилиты"
     for name in "${!GO_TOOLS[@]}" "${!GO_TOOLS_CGO[@]}"; do
-        local actual latest remote_commit remote_state spec kind tool_icon
-        if [[ -v "GO_TOOLS[$name]" ]]; then
-            spec="${GO_TOOLS[$name]}"
-            kind=""
-        else
-            spec="${GO_TOOLS_CGO[$name]}"
-            kind="; CGO"
-        fi
+        local actual latest remote_commit remote_state
         if is_go_tool "$name"; then
             actual=$(go_tool_installed_version "$name" "${GO_BIN_DIR}/${name}" || true)
-            if [ -n "$actual" ]; then
-                tool_icon="${GREEN}✓${NC}"
-            else
-                tool_icon="${YELLOW}?${NC}"
-            fi
         else
             actual=""
-            tool_icon="${RED}✗${NC}"
         fi
         remote_state=$(cat "${_chk_dir}/gotool_${name}" 2>/dev/null) || remote_state="error"
         latest=""
@@ -3872,17 +4412,21 @@ cmd_check_updates() {
             latest="${remote_state%%|*}"
             remote_commit="${remote_state#*|}"
         fi
-        local tool_details="${name} (локально: ${actual:-не установлен}; источник новой установки: ${spec}${kind})"
-        local tool_line="  ${tool_icon} ${tool_details}"
+        local tool_details="$name"
+        [ -z "$actual" ] || tool_details+=" (${actual})"
         if ! is_stable_version_tag "$latest" || ! is_full_commit "$remote_commit"; then
             CHECK_UPDATE_ERRORS=$((CHECK_UPDATE_ERRORS + 1))
-            echo -e "  ${YELLOW}?${NC} ${tool_details} ${YELLOW}(remote: не удалось проверить)${NC}"
+            print_update_line "$RED" '?' "$name" '— ошибка проверки'
         elif [ -n "$actual" ] && [ "${actual#v}" = "${latest#v}" ]; then
-            echo -e "${tool_line} ${GREEN}(remote совпадает с локальной версией)${NC}"
+            print_update_line "$GREEN" '✓' "$tool_details" '— без обновлений'
         elif is_skipped "$name" "$remote_commit"; then
-            echo -e "${tool_line} ${GRAY}(remote-версия скрыта: ${latest}, ${remote_commit:0:12})${NC}"
+            print_update_line "$GRAY" '−' "$name" "— скрыто: ${latest}"
+        elif version_tag_is_newer "$actual" "$latest"; then
+            print_update_line "$GREEN" '✓' "$tool_details" '— без обновлений'
+        elif version_tag_is_newer "$latest" "$actual"; then
+            print_update_line "$CYAN" '↑' "$tool_details" "→ ${latest}"
         else
-            echo -e "${tool_line} ${CYAN}(версия модуля remote: ${latest}, ${remote_commit:0:12})${NC}"
+            print_update_line "$YELLOW" '?' "$tool_details" "— remote: ${latest}; нет базы сравнения"
         fi
     done
 
@@ -3890,19 +4434,17 @@ cmd_check_updates() {
     echo ""
     info "tmux plugins"
     for name in "${!TMUX_PLUGINS[@]}"; do
-        _result=$(cat "${_chk_dir}/tmux_${name}" 2>/dev/null) || _result="error"
+        _result=$(cat "${_chk_dir}/tool_${name}" 2>/dev/null) || _result="error"
         [ -n "$_result" ] || _result="error"
-        display_update_result "$name" "${_tmux_state[$name]}" \
-            "${_tmux_local[$name]}" "" "$_result"
+        display_update_result "$name" "${_check_state[$name]}" \
+            "${_check_local[$name]}" "" "$_result"
     done
 
     echo ""
-    info "Это только отчёт: скрипт не заменяет уже установленные версии."
-    info "Изменение закреплённой версии влияет только на будущую новую установку."
-    info "Скрыть текущую remote-ревизию в отчёте: $0 --skip <имя_инструмента>"
+    info "Скрыть обновление: $0 --skip <инструмент>"
 
     if [ "$CHECK_UPDATE_ERRORS" -gt 0 ]; then
-        error "Не завершено remote-проверок: ${CHECK_UPDATE_ERRORS}"
+        error "Ошибок проверки: ${CHECK_UPDATE_ERRORS}"
         return 1
     fi
     return 0
@@ -3918,38 +4460,15 @@ cmd_skip() {
         error "Инструмент '$name' не найден в конфигурации"
         return 1
     }
+    configure_proxy skip
     acquire_state_lock || return 1
     gist_pull
 
-    # Найти repo URL и базовую ревизию, используемую в отчёте.
-    local repo_url="" update_branch="" target_ref="HEAD" baseline="" go_spec=""
+    local go_spec=""
     if [[ -v "GO_TOOLS[$name]" ]]; then
         go_spec="${GO_TOOLS[$name]}"
     elif [[ -v "GO_TOOLS_CGO[$name]" ]]; then
         go_spec="${GO_TOOLS_CGO[$name]}"
-    elif [[ -v "UV_TOOLS[$name]" ]]; then
-        repo_url=$(uv_tool_url "${UV_TOOLS[$name]}")
-        baseline=$(uv_tool_ref "${UV_TOOLS[$name]}")
-        update_branch=$(uv_tool_update_branch "${UV_TOOLS[$name]}")
-        [ -n "$update_branch" ] && target_ref="refs/heads/${update_branch}"
-    elif [[ -v "GIT_REPOS[$name]" ]]; then
-        repo_url=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f1)
-        baseline=$(echo "${GIT_REPOS[$name]}" | cut -d'|' -f2)
-    elif [[ -v "VENV_REPOS[$name]" ]]; then
-        repo_url=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f1)
-        baseline=$(echo "${VENV_REPOS[$name]}" | cut -d'|' -f2)
-    elif [[ -v "BINARY_TOOLS[$name]" ]]; then
-        repo_url=$(github_repo_from_url "$(binary_tool_url "${BINARY_TOOLS[$name]}")")
-        baseline=$(binary_tool_version "${BINARY_TOOLS[$name]}")
-    elif [[ -v "WIN_TOOLS[$name]" ]]; then
-        repo_url=$(github_repo_from_url "${WIN_TOOLS[$name]}")
-        baseline=$(echo "${WIN_TOOLS[$name]}" | grep -oP '/download/\K[^/]+' || true)
-    elif [[ -v "TMUX_PLUGINS[$name]" ]]; then
-        repo_url="${TMUX_PLUGINS[$name]}"
-        baseline=$(local_git_head "${TMUX_PLUGIN_DIR}/${name}" || true)
-    elif [[ "$name" == "chisel" ]]; then
-        repo_url="https://github.com/jpillora/chisel"
-        baseline="v${CHISEL_VERSION}"
     fi
 
     if [ -n "$go_spec" ]; then
@@ -3972,31 +4491,16 @@ cmd_skip() {
         return 0
     fi
 
-    local head_commit result event_commit="" tag_payload=""
-    head_commit=$(git ls-remote "$repo_url" "$target_ref" 2>/dev/null \
-        | awk -v ref="$target_ref" '$2 == ref {print $1}')
-    if ! is_full_commit "$head_commit"; then
-        error "Не удалось получить HEAD для $name ($repo_url)"
-        return 1
-    fi
-    [ -n "$baseline" ] || baseline="$head_commit"
-
-    result=$(check_remote_updates "$repo_url" "$baseline" "$update_branch")
-    if [ "$result" = "error" ]; then
+    local UPDATE_REPO UPDATE_BRANCH UPDATE_BASELINE UPDATE_CHANNEL
+    local UPDATE_CONFIGURED UPDATE_LOCAL UPDATE_STATE result event_commit
+    tool_update_context "$name" || return 1
+    result=$(check_remote_updates "$UPDATE_REPO" "$UPDATE_BASELINE" "$UPDATE_BRANCH" \
+        "$UPDATE_CHANNEL" "$UPDATE_CONFIGURED")
+    event_commit=$(result_field "$result" "remote-commit" 2>/dev/null || true)
+    if ! is_full_commit "$event_commit"; then
         error "Не удалось определить remote-ревизию для $name"
         return 1
     fi
-    tag_payload=$(result_field "$result" "new-tag" 2>/dev/null || true)
-    if [ -n "$tag_payload" ]; then
-        event_commit="${tag_payload##*:}"
-    else
-        event_commit=$(result_field "$result" "different-head" 2>/dev/null || true)
-    fi
-    [ -n "$event_commit" ] || event_commit="$head_commit"
-    is_full_commit "$event_commit" || {
-        error "Remote вернул неверный идентификатор ревизии для $name"
-        return 1
-    }
 
     set_skip "$name" "$event_commit"
     success "Текущая remote-ревизия $name скрыта (${event_commit:0:12})"
@@ -4254,7 +4758,7 @@ ensure_uv_sudo_wrapper() {
     done
 }
 
-install_uv_tool_package() {
+install_uv_tool_package() (
     local name="$1" source="$2" display_version="$3"
     local install_args=(tool install)
 
@@ -4269,13 +4773,37 @@ install_uv_tool_package() {
     fi
 
     info "Установка $name ($display_version)..."
+    if [ "$name" = manspider ]; then
+        # Как install.sh форка: CLI + web и зависимости из uv.lock.
+        # Сам пакет ставим по Git URL, чтобы проверка обновлений видела commit.
+        local install_tmp repo_url ref
+        install_tmp=$(mktemp -d -t prepare-manspider.XXXXXXXX) || return 1
+        trap 'rm -rf -- "$install_tmp"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        repo_url=$(uv_tool_url "${UV_TOOLS[$name]}")
+        ref=$(uv_tool_ref "${UV_TOOLS[$name]}")
+        if ! git_clone_at_revision "$repo_url" "$install_tmp/source" "$ref"; then
+            error "$name: не удалось получить закреплённую версию форка"
+            return 1
+        fi
+        if ! uv export --directory "$install_tmp/source" --locked --no-dev --extra web \
+            --python "${UV_TOOL_PYTHON[$name]}" --no-emit-project --no-hashes \
+            --no-annotate --no-header --format requirements.txt \
+            --output-file "$install_tmp/constraints.txt" >/dev/null; then
+            error "$name: не удалось прочитать закреплённые зависимости из uv.lock"
+            return 1
+        fi
+        install_args+=(--constraints "$install_tmp/constraints.txt")
+        source="man-spider[web] @ ${source}"
+    fi
     if ! uv "${install_args[@]}" "$source"; then
         error "Не удалось установить $name"
         return 1
     fi
     configure_uv_tool_runtime "$name" || return 1
     success "$name установлен через uv"
-}
+)
 
 install_binary_tool() {
     local name="$1"
@@ -4408,6 +4936,12 @@ install_binary_tool() {
         mv "$dest_tmp" "${LOCAL_BIN}/${command_name}"
         success "$command_name → ${LOCAL_BIN}/${command_name}"
 
+        if [ "$command_name" = "$name" ]; then
+            record_binary_version "$name" "${LOCAL_BIN}/${command_name}" "$configured_version" || {
+                rm -rf -- "$tmpdir"
+                return 1
+            }
+        fi
         if [ "$command_name" = "$name" ] && needs_sudo "$name"; then
             if ! wrap_with_sudo "${LOCAL_BIN}/${name}" "$name"; then
                 rm -rf -- "$tmpdir"
@@ -4477,6 +5011,13 @@ install_venv_repo() {
         && [ -f "$complete_marker" ] \
         && ! cve_2025_venv_ready "$venv_dir"; then
         warn "$name: окружение не содержит закреплённый вариант Impacket; выполняется донастройка"
+        rm -f -- "$complete_marker"
+    fi
+
+    if [ "$name" = "bloodhound-automation" ] \
+        && [ -f "$complete_marker" ] \
+        && ! bloodhound_venv_ready "$venv_dir"; then
+        info "$name: устанавливаем недостающие зависимости для проверки портов"
         rm -f -- "$complete_marker"
     fi
 
@@ -4568,6 +5109,9 @@ install_windows_tool() {
         return 1
     fi
     mv "$win_tmp" "$dest"
+    local installed_version
+    installed_version=$(printf '%s' "${WIN_TOOLS[$name]}" | grep -oP '/download/\K[^/]+')
+    record_binary_version "$name" "$dest" "$installed_version" || return 1
     success "$name → $dest"
 }
 
@@ -4893,7 +5437,11 @@ cmd_install() {
     # ── 10. Venv-репозитории ─────────────────────────────────────────────────
     install_phase "Venv-репозитории (~/tools + обёртки)"
     for name in "${!VENV_REPOS[@]}"; do
-        queue_install_job "venv:${name}" install_venv_repo "$name"
+        if [ "$name" = bloodhound-automation ]; then
+            queue_install_job "venv:${name}" with_bloodhound_proxy install_venv_repo "$name"
+        else
+            queue_install_job "venv:${name}" install_venv_repo "$name"
+        fi
     done
     wait_install_jobs
 
@@ -4977,43 +5525,14 @@ cmd_install() {
             fi
         }
 
-        run_bha_compose_up() {
-            local project_dir="$1"
-            local compose_cmd=() compose_args
-            if docker compose version &>/dev/null; then
-                compose_cmd=(docker compose up -d --pull never)
-            elif cmd_exists docker-compose; then
-                # Compose v1 does not support `up --pull never`; after the
-                # initial pull it reuses the already present images by default.
-                compose_cmd=(docker-compose up -d)
-            else
-                error "Не найдена команда docker compose"
-                return 1
-            fi
-
-            if [ "$DOCKER_GROUP_FRESH" = true ]; then
-                compose_args=$(printf ' %q' "${compose_cmd[@]}")
-                sg docker -c "cd $(printf '%q' "$project_dir") &&${compose_args}"
-            else
-                (cd "$project_dir" && "${compose_cmd[@]}")
-            fi
-        }
-
         local bha_project="${bha_dir}/projects/my_project"
         if [ -e "$bha_project" ] || [ -L "$bha_project" ]; then
-            if [ ! -f "${bha_project}/project.pkl" ] \
-                || [ ! -f "${bha_project}/docker-compose.yml" ]; then
-                error "Проект my_project существует частично: $bha_project"
-                return 1
-            fi
-            info "Проект my_project уже существует; проверяем, что его сервисы запущены..."
-            run_bha_compose_up "$bha_project"
-            success "Проект my_project запущен"
+            info "Запускаем my_project или продолжаем его незавершённую инициализацию..."
         else
             info "Запуск bloodhound-automation start my_project (может занять длительное время)..."
-            run_bha start my_project -t 1200
-            success "BloodHound установлен (проект my_project)"
         fi
+        with_bloodhound_proxy run_bha start my_project -t 1200
+        success "BloodHound запущен (проект my_project)"
     else
         error "bloodhound-automation установлен не полностью"
         return 1
@@ -5031,9 +5550,46 @@ cmd_install() {
     info "Отчёт о новых версиях: $0 --check-updates"
 }
 
+parse_cli_options() {
+    local argument literal=false
+    CLI_ARGUMENTS=()
+    PROXY_SCOPE=bloodhound
+    for argument in "$@"; do
+        if [ "$literal" = false ] && [ "$argument" = --proxy-all ]; then
+            PROXY_SCOPE=all
+        elif [ "$literal" = false ] && [ "$argument" = -- ]; then
+            literal=true
+        else
+            CLI_ARGUMENTS+=("$argument")
+        fi
+    done
+
+    local count=${#CLI_ARGUMENTS[@]}
+    case "${CLI_ARGUMENTS[0]:-}" in
+        "") [ "$count" -eq 0 ] && return 0 ;;
+        --auto|--install|--check-updates|--skip-list|--skip-export|--help|-h)
+            [ "$count" -eq 1 ] && return 0 ;;
+        --skip|--unskip)
+            [ "$count" -eq 2 ] && [ -n "${CLI_ARGUMENTS[1]}" ] && return 0 ;;
+        --skip-import)
+            [ "$count" -le 2 ] && return 0 ;;
+        *)
+            error "Неизвестный параметр: ${CLI_ARGUMENTS[0]}"
+            return 1 ;;
+    esac
+    error "Неверные аргументы. Используйте $0 --help"
+    return 1
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Точка входа
 # ═══════════════════════════════════════════════════════════════════════════════
+
+parse_cli_options "$@" || exit 1
+set -- "${CLI_ARGUMENTS[@]}"
+# Даже команды без интерактивной настройки (например --unskip) должны
+# соблюдать область действия proxy, унаследованного из оболочки.
+initialize_proxy_settings
 
 case "${1:-}" in
     --auto)
@@ -5075,6 +5631,14 @@ case "${1:-}" in
         echo "  $0 --skip-export    — экспорт пропусков в stdout"
         echo "  $0 --skip-import <файл>  — импорт пропусков из файла (или stdin)"
         echo "  $0 --help           — эта справка"
+        echo ""
+        echo "Proxy:"
+        echo "  По умолчанию — только установка и запуск bloodhound-automation"
+        echo "  --proxy-all         — прежний режим: proxy для всех сетевых операций"
+        echo "  Примеры: $0 --auto --proxy-all; $0 --check-updates --proxy-all"
+        echo "  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY — адреса proxy; NO_PROXY — исключения"
+        echo "  Поддерживаются и строчные имена; --auto берёт настройки из окружения"
+        echo "  Без --proxy-all проверка обновлений выполняется напрямую, без запроса proxy"
         echo ""
         echo "Окружение:"
         echo "  Платформа установки: Kali Linux AMD64 (x86_64)"
