@@ -1446,11 +1446,15 @@ path = Path(sys.argv[1])
 original = path.read_text()
 text = original
 
+# Compose запускают и напрямую: локальные исключения обязательны даже без
+# with_bloodhound_proxy. Пользовательский список берём из lower/upper-case env.
 proxy_lines = (
     '      - http_proxy=${http_proxy:-}\n',
     '      - https_proxy=${https_proxy:-}\n',
     '      - HTTP_PROXY=${http_proxy:-}\n',
     '      - HTTPS_PROXY=${https_proxy:-}\n',
+    '      - no_proxy=localhost,127.0.0.1,::1,app-db,graph-db,bloodhound,${no_proxy:-${NO_PROXY:-}}\n',
+    '      - NO_PROXY=localhost,127.0.0.1,::1,app-db,graph-db,bloodhound,${no_proxy:-${NO_PROXY:-}}\n',
 )
 
 # Сначала сворачиваем блоки от прежних запусков, затем создаём ровно один
@@ -2117,13 +2121,75 @@ start_methods = r'''    def composeCommand(self) -> List[str]:
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
-    def startServices(self, log_mode: str = "a", preserve_containers: bool = True) -> None:
+    def refreshGraphProxy(self) -> None:
+        """Apply the proxy bypass to a legacy container without replacing its data."""
+        identifiers = self.composeOutput(["ps", "-a", "-q", "graph-db"]).split()
+        if len(identifiers) != 1:
+            raise RuntimeError("Cannot safely update proxy settings: expected one graph-db container")
+        result = subprocess.run(
+            ["docker", "inspect", identifiers[0]], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=True, timeout=30,
+        )
+        container = json.loads(result.stdout)[0]
+        environment = dict(item.split("=", 1) for item in container["Config"].get("Env", []) if "=" in item)
+        if not any(environment.get(key) for key in ("http_proxy", "HTTP_PROXY")):
+            return
+        required = {"localhost", "127.0.0.1", "::1", "app-db", "graph-db", "bloodhound"}
+        if all(required <= set(environment.get(key, "").split(",")) for key in ("no_proxy", "NO_PROXY")):
+            return
+
+        # Only migrate the known healthcheck. Keep custom configurations and
+        # changes to the image, database credentials or data mount for review.
+        expected_healthcheck = ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
+        if container["Config"].get("Healthcheck", {}).get("Test") != expected_healthcheck:
+            raise RuntimeError("Cannot safely update graph-db proxy: unexpected healthcheck; container was preserved")
+        resolved = yaml.safe_load(self.composeOutput(["config"]))
+        service = resolved["services"]["graph-db"]
+        if service.get("healthcheck", {}).get("test") != expected_healthcheck:
+            raise RuntimeError("Cannot safely update graph-db proxy: healthcheck changed; container was preserved")
+        configured_environment = service.get("environment") or {}
+        if isinstance(configured_environment, list):
+            configured_environment = dict(item.split("=", 1) for item in configured_environment if "=" in item)
+        if not all(required <= set(str(configured_environment.get(key, "")).split(","))
+                   for key in ("no_proxy", "NO_PROXY")):
+            raise RuntimeError("graph-db proxy bypass is missing from Compose; rerun prepare.sh --install")
+        if any(environment.get(key, "") != str(value if value is not None else "")
+               for key, value in configured_environment.items() if key not in ("no_proxy", "NO_PROXY")):
+            raise RuntimeError("Cannot safely update graph-db proxy: other environment settings changed; container was preserved")
+        image = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", service["image"]],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30,
+        )
+        if image.stdout.strip() != container["Image"]:
+            raise RuntimeError("Cannot safely update graph-db proxy: image changed; container was preserved")
+        data_mounts = [mount for mount in service.get("volumes", [])
+                       if isinstance(mount, dict) and mount.get("target") == "/data"]
+        existing_mounts = [mount for mount in container.get("Mounts", []) if mount.get("Destination") == "/data"]
+        if len(data_mounts) != 1 or len(existing_mounts) != 1:
+            raise RuntimeError("Cannot safely update graph-db proxy: unrecognized data mount; container was preserved")
+        wanted, existing = data_mounts[0], existing_mounts[0]
+        if wanted.get("type") == "volume":
+            source = resolved.get("volumes", {}).get(wanted.get("source"), {}).get("name")
+            matches = source and existing.get("Type") == "volume" and existing.get("Name") == source
+        elif wanted.get("type") == "bind":
+            matches = existing.get("Type") == "bind" and existing.get("Source") == wanted.get("source")
+        else:
+            matches = False
+        if not matches or existing.get("RW") != (not wanted.get("read_only", False)):
+            raise RuntimeError("Cannot safely update graph-db proxy: data mount changed; container was preserved")
+        print(Fore.YELLOW + "[*] Applying localhost proxy bypass to graph-db; keeping its image and data volume" + Style.RESET_ALL)
+        self.runCompose([*self.composeUpArguments(), "--no-deps", "graph-db"], "a")
+
+
+    def startServices(self, log_mode: str = "a", preserve_containers: bool = True, refresh_proxy: bool = False) -> None:
         # Compose aborts dependency startup as soon as a healthcheck becomes
         # unhealthy. Wait ourselves: GDS may still be downloading at that point.
         arguments = [*self.composeUpArguments(), "--no-deps"]
         if preserve_containers:
             arguments.append("--no-recreate")
         self.runCompose([*arguments, "app-db", "graph-db"], log_mode)
+        if refresh_proxy:
+            self.refreshGraphProxy()
         self.waitForDatabases()
         self.runCompose([*arguments, "bloodhound"], "a")
 
@@ -2132,6 +2198,22 @@ start_methods = r'''    def composeCommand(self) -> List[str]:
         directory = self.source_directory / self.name
         return {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
                 for name in ("docker-compose.yml", "bloodhound.config.json")}
+
+
+    def initializationConfigMatches(self, saved: dict) -> bool:
+        current = self.initializationConfigHashes()
+        if saved == current:
+            return True
+        # Accept only the exact managed proxy addition to an old manifest.
+        # recordInitialization publishes the new hashes after all resume checks.
+        compose = (self.source_directory / self.name / "docker-compose.yml").read_text()
+        for key in ("no_proxy", "NO_PROXY"):
+            line = "      - " + key + "=localhost,127.0.0.1,::1,app-db,graph-db,bloodhound,${no_proxy:-${NO_PROXY:-}}\n"
+            if compose.count(line) != 3:
+                return False
+            compose = compose.replace(line, "")
+        current["docker-compose.yml"] = hashlib.sha256(compose.encode()).hexdigest()
+        return saved == current
 
 
     def restoreIncomplete(self) -> None:
@@ -2172,7 +2254,7 @@ start_methods = r'''    def composeCommand(self) -> List[str]:
             state = json.loads(state_path.read_text())
             if (not isinstance(state, dict) or state.get("version") != 1
                     or state.get("ports") != ports or state.get("no_gds") != no_gds
-                    or state.get("config_hashes") != self.initializationConfigHashes()
+                    or not self.initializationConfigMatches(state.get("config_hashes"))
                     or not isinstance(state.get("password"), str)):
                 raise ValueError("Cannot safely resume: initialization settings or project configuration changed")
             if self.password is not None and self.password != state["password"]:
@@ -2291,7 +2373,7 @@ start_methods = r'''    def composeCommand(self) -> List[str]:
                     + Style.RESET_ALL
                 )
                 up_log_mode = "w"
-            self.startServices(up_log_mode)
+            self.startServices(up_log_mode, refresh_proxy=resume)
             self.initializeWeb()
             self.save()
             (self.source_directory / self.name / "initialization.json").unlink(missing_ok=True)
