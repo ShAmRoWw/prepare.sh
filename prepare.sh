@@ -2917,6 +2917,43 @@ tmux_quote() {
     printf "'%s'" "$value"
 }
 
+tmux_plugin_executables_ready() {
+    local name="$1" dir="$2" repair="${3:-false}" entry
+    local entries=()
+    case "$name" in
+        tpm) entries=(tpm) ;;
+        tmux-sensible) entries=(sensible.tmux) ;;
+        tmux-logging)
+            entries=(logging.tmux scripts/toggle_logging.sh scripts/start_logging.sh
+                scripts/screen_capture.sh scripts/save_complete_history.sh
+                scripts/clear_history.sh scripts/check_tmux_version.sh) ;;
+        *) return 0 ;;
+    esac
+
+    # Проверяем весь набор до chmod: недостающие файлы и ссылки не исправляем.
+    for entry in "${entries[@]}"; do
+        if [ ! -f "${dir}/${entry}" ] || [ ! -s "${dir}/${entry}" ] || [ -L "${dir}/${entry}" ]; then
+            error "tmux plugin $name: отсутствует или повреждён файл: ${dir}/${entry}"
+            return 1
+        fi
+    done
+    for entry in "${entries[@]}"; do
+        if [ ! -x "${dir}/${entry}" ]; then
+            if [ "$repair" = true ]; then
+                if ! chmod u+x -- "${dir}/${entry}"; then
+                    error "tmux plugin $name: не удалось восстановить право исполнения: ${dir}/${entry}"
+                    return 1
+                fi
+            fi
+            if [ ! -x "${dir}/${entry}" ]; then
+                error "tmux plugin $name: файл не исполняемый: ${dir}/${entry}"
+                return 1
+            fi
+            info "tmux plugin $name: восстановлено право исполнения: $entry"
+        fi
+    done
+}
+
 tmux_install_plugin() {
     local name="$1" repo="$2"
     local dir="${TMUX_PLUGIN_DIR}/${name}"
@@ -2926,6 +2963,7 @@ tmux_install_plugin() {
             error "tmux plugin $name: существующий Git-репозиторий повреждён: $dir"
             return 1
         fi
+        tmux_plugin_executables_ready "$name" "$dir" true || return 1
         success "tmux plugin $name уже установлен"
         return 0
     fi
@@ -2935,7 +2973,8 @@ tmux_install_plugin() {
     fi
 
     info "Клонирование tmux plugin $name..."
-    git_clone_at_revision "$repo" "$dir" ""
+    git_clone_at_revision "$repo" "$dir" "" || return 1
+    tmux_plugin_executables_ready "$name" "$dir" true || return 1
     success "tmux plugin $name установлен"
 }
 
@@ -3015,8 +3054,13 @@ tmux_configured() {
 tmux_validate_config() {
     local conf="$1" socket="prepare-$UID-$$-$RANDOM"
     local output="" failure_reason="" validation_root validation_conf
-    local actual_value bindings
+    local actual_value bindings plugin
     local validation_status=0
+
+    # Одна привязка клавиши ещё не гарантирует, что её обработчик запускается.
+    for plugin in tpm tmux-sensible tmux-logging; do
+        tmux_plugin_executables_ready "$plugin" "${TMUX_PLUGIN_DIR}/${plugin}" || return 1
+    done
 
     # TPM не использует путь из `tmux -f`: он самостоятельно перечитывает
     # ~/.tmux.conf или XDG_CONFIG_HOME/tmux/tmux.conf. Помещаем проверяемый
